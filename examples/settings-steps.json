@@ -1,0 +1,12 @@
+{
+  "label": "smoke test: drive the preinstalled Settings app",
+  "app": { "bundleId": "com.apple.Preferences" },
+  "screenshots": ["settings-root", "general-page"],
+  "steps": [
+    { "action": "wait", "ms": 2000 },
+    { "action": "screenshot", "name": "settings-root", "note": "Settings landing screen" },
+    { "action": "tap", "label": "General", "waitTimeoutMs": 8000 },
+    { "action": "wait", "ms": 1500 },
+    { "action": "screenshot", "name": "general-page", "note": "General settings page" }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "label": "demo app - sign in and enable beta features",
+  "app": {
+    "project": "DemoApp/DemoApp.xcodeproj",
+    "scheme": "DemoApp",
+    "configuration": "Debug"
+  },
+  "screenshots": ["login-filled", "counter", "beta-enabled"],
+  "steps": [
+    { "action": "wait_for", "id": "email_field", "timeoutMs": 15000 },
+    { "action": "tap", "id": "email_field" },
+    { "action": "type", "text": "demo@example.com" },
+    { "action": "tap", "id": "password_field" },
+    { "action": "type", "text": "hunter2" },
+    { "action": "screenshot", "name": "login-filled", "note": "Credentials entered, before submitting" },
+    { "action": "tap", "id": "sign_in_button" },
+    { "action": "wait_for", "id": "count_label", "timeoutMs": 10000 },
+    { "action": "tap", "id": "increment_button" },
+    { "action": "tap", "id": "increment_button" },
+    { "action": "screenshot", "name": "counter", "note": "Counter incremented twice" },
+    { "action": "tap", "label": "Settings" },
+    { "action": "wait_for", "id": "beta_toggle", "timeoutMs": 10000 },
+    { "action": "tap", "id": "beta_toggle" },
+    { "action": "screenshot", "name": "beta-enabled", "note": "Beta Features toggle switched on" }
+  ]
+}

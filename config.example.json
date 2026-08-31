@@ -1,0 +1,47 @@
+{
+  "//": "Copy to ~/.sim-harness/config.json and delete what you do not need.",
+  "//_": "Every key is optional; omitted keys use the built-in default shown here.",
+
+  "poolSize": 3,
+  "deviceType": "iPhone 17 Pro",
+  "runtime": "",
+
+  "host": "127.0.0.1",
+  "port": 8829,
+
+  "//_exposure": "The daemon REFUSES to bind beyond 127.0.0.1 while edgeAuth is 'none'.",
+  "edgeAuth": "none",
+  "edgeAllowLoopback": true,
+
+  "//_cloudflare": "edgeAuth: 'cloudflare-access' -- run `sim-harness tunnel <host>` for the setup steps.",
+  "cloudflareTeamDomain": "",
+  "cloudflareAud": [],
+
+  "//_ztna": "edgeAuth: 'trusted-proxy' -- for a Netskope NPA publisher or an internal reverse proxy.",
+  "trustedProxies": [],
+  "identityHeader": "",
+
+  "//_binding": "Which bearer tokens an edge identity may use, so neither credential works alone.",
+  "identityBindings": {},
+
+  "//_tls": "Corporate root CA for networks that inspect TLS. Re-run ./install.sh after setting this -- Node reads NODE_EXTRA_CA_CERTS once at startup.",
+  "caBundle": "",
+
+  "//_remote": "Remote MCP, for Claude connectors including the phone app. Claude's cloud dials this, so it must be publicly reachable -- Tailscale will not work.",
+  "publicUrl": "",
+  "remotePort": 8830,
+  "//_remoteToken": "Token the remote MCP server uses against the daemon. Scope it down: `sim-harness token create phone --preset remote`.",
+  "remoteToken": "",
+
+  "defaultTimeoutMs": 600000,
+  "defaultMaxActions": 60,
+  "defaultResetPolicy": "uninstall",
+
+  "llmBackend": "auto",
+  "model": "claude-opus-5",
+  "effort": "high",
+
+  "retainRuns": 200,
+  "maxArtifactBytes": 1073741824,
+  "artifactRetentionDays": 14
+}

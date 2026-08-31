@@ -1,0 +1,10 @@
+{
+  "label": "XCUITest: real multi-touch pinch, asserted",
+  "app": {},
+  "xctest": {
+    "project": "DemoApp/DemoApp.xcodeproj",
+    "scheme": "DemoApp",
+    "configuration": "Debug",
+    "timeoutMs": 1500000
+  }
+}

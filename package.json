@@ -1,0 +1,32 @@
+{
+  "name": "sim-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hand off iOS simulator testing to a pool of pre-booted sims. Agents submit a build + scenario, poll for completion, and get screenshots back as PR evidence.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "sim-harness": "./dist/cli.js",
+    "sim-harness-mcp": "./dist/mcp.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js dist/mcp.js dist/mcp-remote.js dist/daemon.js",
+    "dev": "node --experimental-strip-types src/daemon.ts",
+    "start": "node dist/daemon.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "@modelcontextprotocol/sdk": "^1.24.0",
+    "express": "^5.2.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "label": "scenario: change Settings to dark appearance",
+  "app": { "bundleId": "com.apple.Preferences" },
+  "scenario": "You are in the iOS Settings app. Open the General page, then open the About page inside it.",
+  "screenshots": ["general", "about"],
+  "assert": "The About page is open and shows device information such as the iOS version.",
+  "maxActions": 16
+}

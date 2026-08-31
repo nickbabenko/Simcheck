@@ -1,0 +1,54 @@
+# Build an iOS app for the simulator in CI, then have sim-harness test it.
+#
+# The harness downloads the artifact itself: an MCP tool call carries JSON, so a
+# 40MB binary cannot go through one. That is what `app.url` is for.
+name: simulator build
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: macos-15          # iOS builds need macOS
+    steps:
+      - uses: actions/checkout@v4
+
+      # A SIMULATOR build. An .ipa is an arm64 device slice and will not run
+      # on a simulator -- sim-harness rejects those explicitly.
+      - name: Build for the simulator
+        run: |
+          xcodebuild \
+            -scheme "$SCHEME" \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+        env:
+          SCHEME: App
+
+      # ditto, not zip: it preserves the executable bit and symlinks inside the
+      # bundle. actions/upload-artifact does not, so uploading a raw .app gives
+      # you a bundle that cannot launch.
+      - name: Package
+        run: |
+          APP=$(find build/Build/Products/Debug-iphonesimulator -maxdepth 1 -name '*.app' | head -1)
+          ditto -c -k --keepParent "$APP" App.zip
+
+      # Push straight to the harness. One step, no GitHub token on the Mac,
+      # and it prints the artifact id to test with.
+      - name: Push to sim-harness
+        run: |
+          curl -sS -X POST "$SIM_HARNESS_URL/upload?label=$GITHUB_REF_NAME&gitSha=$GITHUB_SHA" \
+            -H "Authorization: Bearer $SIM_HARNESS_TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary @App.zip
+        env:
+          SIM_HARNESS_URL: ${{ secrets.SIM_HARNESS_URL }}
+          SIM_HARNESS_TOKEN: ${{ secrets.SIM_HARNESS_TOKEN }}
+
+      # Alternative: keep it as a GitHub artifact and let the harness pull it
+      # later with app.github. Needs a GitHub token stored on the harness.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simulator-app
+          path: App.zip
+          retention-days: 7

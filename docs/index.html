@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sim-harness — hand off iOS testing to an agent</title>
+<meta name="description" content="Submit a build, a test scenario and the screenshots you want back. A pool of pre-booted iOS simulators does the rest.">
+<meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111113" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📱</text></svg>">
+<style>
+  :root {
+    --bg: #f4f4f5;
+    --card: #ffffff;
+    --card-hover: #fafafa;
+    --text: #18181b;
+    --muted: #71717a;
+    --border: #e4e4e7;
+    --accent: #2563eb;
+    --ok: #16a34a;
+    --warn: #b45309;
+    --down: #dc2626;
+    --code-bg: #fafafa;
+    --shadow: 0 1px 2px rgb(0 0 0 / .06), 0 1px 3px rgb(0 0 0 / .04);
+    --radius: 14px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111113; --card: #1c1c1f; --card-hover: #232327;
+      --text: #f4f4f5; --muted: #8b8b93; --border: #2a2a2f;
+      --accent: #60a5fa; --ok: #22c55e; --warn: #f59e0b; --down: #ef4444;
+      --code-bg: #151517; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: 24px; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 1080px; margin-inline: auto;
+    padding: calc(env(safe-area-inset-top) + 40px) calc(env(safe-area-inset-right) + 20px)
+             calc(env(safe-area-inset-bottom) + 80px) calc(env(safe-area-inset-left) + 20px);
+    display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 48px;
+  }
+  @media (max-width: 860px) { .wrap { grid-template-columns: 1fr; gap: 0; } nav.toc { display: none; } }
+
+  /* ---- nav ---- */
+  nav.toc { position: sticky; top: 32px; align-self: start; font-size: .875rem; }
+  nav.toc a {
+    display: block; color: var(--muted); text-decoration: none;
+    padding: 5px 10px; border-radius: 7px; border-left: 2px solid transparent;
+  }
+  nav.toc a:hover { color: var(--text); background: var(--card); }
+  nav.toc a.on { color: var(--accent); border-left-color: var(--accent); font-weight: 550; }
+  nav.toc .grp { font-size: .7rem; text-transform: uppercase; letter-spacing: .07em;
+                 color: var(--muted); margin: 18px 0 6px 10px; opacity: .7; }
+
+  /* ---- type ---- */
+  h1 { font-size: 2.1rem; letter-spacing: -.03em; font-weight: 660; margin: 0 0 10px; }
+  h2 { font-size: 1.35rem; letter-spacing: -.02em; font-weight: 620;
+       margin: 56px 0 14px; padding-top: 8px; }
+  h3 { font-size: 1rem; font-weight: 620; margin: 30px 0 8px; }
+  p { margin: 0 0 14px; }
+  .lede { font-size: 1.1rem; color: var(--muted); margin-bottom: 22px; }
+  a { color: var(--accent); }
+  ul { margin: 0 0 14px; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  strong { font-weight: 620; }
+  code { font-family: var(--mono); font-size: .84em;
+         background: var(--code-bg); border: 1px solid var(--border);
+         padding: 1px 5px; border-radius: 5px; }
+
+  /* ---- blocks ---- */
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; margin: 0 0 14px; position: relative;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: .82rem; line-height: 1.6; }
+  .copy {
+    position: absolute; top: 8px; right: 8px; font: inherit; font-size: .68rem;
+    padding: 3px 8px; border-radius: 6px; cursor: pointer;
+    background: var(--card); color: var(--muted);
+    border: 1px solid var(--border); opacity: 0; transition: opacity .12s;
+  }
+  pre:hover .copy, .copy:focus { opacity: 1; }
+  .copy:hover { color: var(--text); }
+  .copy.done { color: var(--ok); border-color: var(--ok); opacity: 1; }
+
+  .card { background: var(--card); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 18px 20px; box-shadow: var(--shadow); }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 14px; }
+  .grid h3 { margin: 0 0 5px; font-size: .95rem; }
+  .grid p { margin: 0; color: var(--muted); font-size: .88rem; }
+
+  .note { border-left: 3px solid var(--accent); background: var(--card);
+          border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 0 0 16px; font-size: .92rem; }
+  .note.warn { border-left-color: var(--warn); }
+  .note.danger { border-left-color: var(--down); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .lbl { font-weight: 620; }
+
+  table { width: 100%; border-collapse: collapse; margin: 0 0 16px; font-size: .9rem; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-weight: 620; font-size: .78rem; text-transform: uppercase;
+       letter-spacing: .05em; color: var(--muted); }
+  td code { font-size: .82em; white-space: nowrap; }
+
+  /* ---- tabs ---- */
+  .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 14px;
+          border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .tabs button {
+    font: inherit; font-size: .85rem; padding: 6px 12px; border-radius: 8px;
+    cursor: pointer; background: transparent; color: var(--muted); border: 1px solid transparent;
+  }
+  .tabs button:hover { color: var(--text); background: var(--card); }
+  .tabs button[aria-selected="true"] {
+    background: var(--card); color: var(--text);
+    border-color: var(--border); font-weight: 600; box-shadow: var(--shadow);
+  }
+  .panel[hidden] { display: none; }
+  .panel > p:first-child { margin-top: 0; }
+
+  /* ---- flow diagram ---- */
+  .flow { background: var(--card); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 20px; margin-bottom: 16px; overflow-x: auto; }
+  .flow svg { display: block; width: 100%; min-width: 560px; height: auto; }
+  .flow text { font: 12px var(--mono); fill: var(--text); }
+  .flow text.m { fill: var(--muted); font-size: 11px; }
+  .flow rect { fill: var(--bg); stroke: var(--border); }
+  .flow line, .flow path { stroke: var(--muted); fill: none; }
+
+  .pill { display: inline-block; font-size: .7rem; font-family: var(--mono);
+          padding: 2px 7px; border-radius: 20px; border: 1px solid var(--border);
+          color: var(--muted); background: var(--bg); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.no { color: var(--down); border-color: var(--down); }
+  footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--border);
+           color: var(--muted); font-size: .82rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="toc" aria-label="Contents">
+  <div class="grp">Overview</div>
+  <a href="#what">What it is</a>
+  <a href="#features">Features</a>
+  <div class="grp">How it works</div>
+  <a href="#flow">The flow</a>
+  <a href="#pool">The pool</a>
+  <a href="#scenarios">Two ways to test</a>
+  <div class="grp">Setup</div>
+  <a href="#install">Install</a>
+  <a href="#agents">Connect an agent</a>
+  <a href="#first">First run</a>
+  <div class="grp">Operating</div>
+  <a href="#security">Security</a>
+  <a href="#deploy">Where to run it</a>
+  <a href="#reference">Reference</a>
+</nav>
+
+<main>
+
+<h1>sim-harness</h1>
+<p class="lede">
+  Hand off iOS testing to a pool of pre-booted simulators. An agent submits a
+  build, a test scenario and the screenshots it wants back — and gets evidence,
+  not assurances.
+</p>
+
+<h2 id="what">What it is</h2>
+<p>
+  An agent that has just changed iOS UI code has no way to know it worked. It can
+  read the diff, it can reason about the view hierarchy, and it can still be
+  wrong. sim-harness closes that loop: it runs the build on a real simulator,
+  drives the flow, and returns named screenshots.
+</p>
+<p>
+  The output is designed to be pasted into a pull request. A reviewer sees the
+  verdict, the assertion it was judged against, and a picture of the screen —
+  rather than a claim that the toggle now works.
+</p>
+
+<div class="note">
+  <p><span class="lbl">The rule it enforces:</span> a run only passes if every
+  screenshot you asked for actually exists. If the flow never reached that state,
+  the run fails — which is a real signal, not a harness bug.</p>
+</div>
+
+<h2 id="features">Features</h2>
+<div class="grid">
+  <div class="card">
+    <h3>Warm simulator pool</h3>
+    <p>N simulators kept booted and idle. No cold-boot tax on the first run, and pool size is the concurrency limit.</p>
+  </div>
+  <div class="card">
+    <h3>Natural language or exact steps</h3>
+    <p>Describe the flow in English, or give precise taps. Either way you get a replayable step list back.</p>
+  </div>
+  <div class="card">
+    <h3>Screenshots as evidence</h3>
+    <p>Named captures returned as images an agent can actually look at, plus a markdown report for the PR.</p>
+  </div>
+  <div class="card">
+    <h3>Submit and poll</h3>
+    <p>Runs return a job id immediately and queue as <code>pending</code>. Long-poll for completion; nothing blocks.</p>
+  </div>
+  <div class="card">
+    <h3>Scoped tokens</h3>
+    <p>Capability-based auth. A remote token can never name a path on your machine — it runs uploaded builds only.</p>
+  </div>
+  <div class="card">
+    <h3>Clean between runs</h3>
+    <p>Each device is reset and its screen sanitised, so one run's permission dialog can't break the next.</p>
+  </div>
+</div>
+
+<h2 id="flow">How it works</h2>
+<p>
+  A daemon owns a pool of simulators and a queue of runs. Everything else — the
+  CLI, the MCP server, your agent — is a client of its HTTP API.
+</p>
+
+<div class="flow">
+<svg viewBox="0 0 720 250" role="img" aria-label="Agent submits a run; the daemon queues it, leases a simulator, drives the app and returns screenshots.">
+  <rect x="0" y="30" width="150" height="58" rx="9"/>
+  <text x="16" y="55">agent</text>
+  <text x="16" y="73" class="m">Claude / Codex / …</text>
+
+  <rect x="270" y="30" width="170" height="58" rx="9"/>
+  <text x="286" y="55">daemon</text>
+  <text x="286" y="73" class="m">queue + scheduler</text>
+
+  <rect x="560" y="8" width="150" height="42" rx="9"/>
+  <text x="576" y="27">sim-harness-01</text>
+  <text x="576" y="42" class="m">ready</text>
+  <rect x="560" y="58" width="150" height="42" rx="9"/>
+  <text x="576" y="77">sim-harness-02</text>
+  <text x="576" y="92" class="m">leased</text>
+  <rect x="560" y="108" width="150" height="42" rx="9"/>
+  <text x="576" y="127">sim-harness-03</text>
+  <text x="576" y="142" class="m">pending</text>
+
+  <line x1="150" y1="48" x2="264" y2="48" marker-end="url(#a)"/>
+  <text x="160" y="41" class="m">1. submit</text>
+  <line x1="264" y1="72" x2="152" y2="72" marker-end="url(#a)"/>
+  <text x="164" y="88" class="m">2. run id</text>
+
+  <line x1="440" y1="48" x2="554" y2="48" marker-end="url(#a)"/>
+  <text x="452" y="41" class="m">3. lease</text>
+
+  <path d="M355 88 L355 130 L520 130 L520 175 L200 175" marker-end="url(#a)"/>
+  <text x="214" y="168" class="m">4. build → install → drive → capture</text>
+
+  <line x1="150" y1="200" x2="264" y2="200" marker-end="url(#a)"/>
+  <text x="152" y="193" class="m">5. poll</text>
+  <line x1="264" y1="224" x2="152" y2="224" marker-end="url(#a)"/>
+  <text x="158" y="240" class="m">6. verdict + screenshots</text>
+
+  <line x1="440" y1="212" x2="554" y2="212" marker-end="url(#a)"/>
+  <text x="446" y="205" class="m">7. recycle</text>
+  <rect x="560" y="190" width="150" height="42" rx="9"/>
+  <text x="576" y="209">reset + sanitise</text>
+  <text x="576" y="224" class="m">back to ready</text>
+
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+    <path d="M0 0 L10 5 L0 10 z" fill="currentColor" style="fill:var(--muted);stroke:none"/></marker></defs>
+</svg>
+</div>
+
+<p>A run moves through these states:</p>
+<table>
+  <tr><th>State</th><th>Meaning</th></tr>
+  <tr><td><code>pending</code></td><td>Queued. No simulator free yet.</td></tr>
+  <tr><td><code>preparing</code></td><td>Device leased; building or installing.</td></tr>
+  <tr><td><code>running</code></td><td>Driving the app.</td></tr>
+  <tr><td><code>passed</code></td><td>Assertion held and every requested screenshot exists.</td></tr>
+  <tr><td><code>failed</code></td><td>It ran, but the assertion didn't hold or a screenshot was unreachable.</td></tr>
+  <tr><td><code>error</code></td><td>The harness or the build broke. <strong>Not</strong> a verdict on the app.</td></tr>
+  <tr><td><code>timeout</code> / <code>cancelled</code></td><td>Ran out of time, or was stopped.</td></tr>
+</table>
+
+<h3 id="pool">The pool</h3>
+<p>
+  Simulators are kept booted so a run starts immediately. A device added to the
+  pool is <code>pending</code> until it has been booted, then <code>ready</code>;
+  it becomes <code>leased</code> for the duration of a run and
+  <code>recycling</code> while it is reset.
+</p>
+<div class="note warn">
+  <p><span class="lbl">It only touches its own devices.</span> The pool creates,
+  boots, erases and deletes simulators named <code>sim-harness-*</code> and
+  nothing else. The simulators you use in Xcode are never affected.</p>
+</div>
+<p>
+  Recycling uninstalls the app and then <em>sanitises the screen</em>. That second
+  step matters more than it sounds: uninstalling an app does not dismiss a system
+  alert it left behind — an <em>"Allow X to access your calendar?"</em> sheet
+  belongs to SpringBoard and would silently swallow the next run's taps. So the
+  device is returned to the home screen, any leftover modal is dismissed (always
+  choosing the declining option, never granting a permission), and the device is
+  rebooted if that fails.
+</p>
+
+<h3 id="scenarios">Two ways to describe a test</h3>
+<p>
+  <strong>Natural language</strong> — an agent reads the accessibility tree,
+  works out the taps, and captures the screenshots you named:
+</p>
+<pre><code>{
+  "app": { "project": "App.xcodeproj", "scheme": "App" },
+  "scenario": "Sign in as demo@example.com / hunter2, open Settings, turn on Beta Features.",
+  "screenshots": ["signed-in", "beta-on"],
+  "assert": "The Beta Features toggle reads On."
+}</code></pre>
+<p><strong>Explicit steps</strong> — deterministic, no model in the loop, no token cost:</p>
+<pre><code>{
+  "app": { "path": "/abs/path/App.app" },
+  "screenshots": ["beta-on"],
+  "steps": [
+    { "action": "tap", "id": "beta_toggle" },
+    { "action": "screenshot", "name": "beta-on" }
+  ]
+}</code></pre>
+<div class="note">
+  <p>Every natural-language run returns <code>executedSteps</code> — the exact
+  actions it took. Lift those into a <code>steps</code> run and a one-off
+  exploration becomes a repeatable regression check that costs nothing.</p>
+</div>
+
+<h2 id="install">Install</h2>
+<p>Requires macOS, Node 20+, Xcode with an iOS simulator runtime, and Homebrew.</p>
+<pre><code>git clone &lt;repo&gt; ~/Developer/sim-harness
+cd ~/Developer/sim-harness
+./install.sh</code></pre>
+<p>That checks your toolchain, installs the
+  <a href="https://github.com/cameroncooke/AXe">AXe</a> simulator driver, builds,
+  links <code>sim-harness</code> into <code>~/.local/bin</code>, registers a
+  launchd agent so the pool is warm after a reboot, and installs the Claude skill
+  and MCP server.</p>
+<p>Then confirm the environment is sane:</p>
+<pre><code>sim-harness doctor</code></pre>
+<div class="note warn">
+  <p><span class="lbl">Most common failure:</span> your Xcode SDK is older than
+  your installed simulator runtimes. <code>xcodebuild</code> cannot target a
+  runtime newer than its SDK, so every build-from-source run fails with a
+  confusing "no destination" error. <code>doctor</code> detects this and tells
+  you which to change.</p>
+</div>
+
+<h2 id="agents">Connect an agent</h2>
+<p>
+  sim-harness speaks <a href="https://modelcontextprotocol.io">MCP</a> over stdio,
+  so any MCP-capable agent can drive it. To get the exact config for your machine,
+  with real paths already filled in:
+</p>
+<pre><code>sim-harness mcp-config          # all of them
+sim-harness mcp-config codex    # just one</code></pre>
+
+<div class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" aria-controls="t-cc">Claude Code</button>
+  <button role="tab" aria-selected="false" aria-controls="t-cd">Claude Desktop</button>
+  <button role="tab" aria-selected="false" aria-controls="t-cx">Codex</button>
+  <button role="tab" aria-selected="false" aria-controls="t-cu">Cursor</button>
+  <button role="tab" aria-selected="false" aria-controls="t-vs">VS Code</button>
+  <button role="tab" aria-selected="false" aria-controls="t-ge">Any other agent</button>
+</div>
+
+<div class="panel" id="t-cc" role="tabpanel">
+  <p>One command, applied to every session:</p>
+  <pre><code>claude mcp add sim-harness --scope user -- /opt/homebrew/bin/node ~/Developer/sim-harness/dist/mcp.js</code></pre>
+  <p>Verify with <code>claude mcp list</code>. The installer also drops an
+    <code>ios-sim-test</code> skill into <code>~/.claude/skills/</code>, which
+    teaches Claude when to reach for the harness and how to write a good scenario.</p>
+</div>
+
+<div class="panel" id="t-cd" role="tabpanel" hidden>
+  <p>Edit <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>:</p>
+  <pre><code>{
+  "mcpServers": {
+    "sim-harness": {
+      "command": "/opt/homebrew/bin/node",
+      "args": ["/Users/you/Developer/sim-harness/dist/mcp.js"]
+    }
+  }
+}</code></pre>
+  <p>Quit and reopen Claude Desktop. Paths must be absolute — <code>~</code> is not expanded.</p>
+</div>
+
+<div class="panel" id="t-cx" role="tabpanel" hidden>
+  <p>Add to <code>~/.codex/config.toml</code>:</p>
+  <pre><code>[mcp_servers.sim-harness]
+command = "/opt/homebrew/bin/node"
+args = ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
+  <p>Or let the CLI do it:</p>
+  <pre><code>codex mcp add sim-harness -- /opt/homebrew/bin/node ~/Developer/sim-harness/dist/mcp.js</code></pre>
+</div>
+
+<div class="panel" id="t-cu" role="tabpanel" hidden>
+  <p><code>~/.cursor/mcp.json</code> for every project, or <code>.cursor/mcp.json</code> for one:</p>
+  <pre><code>{
+  "mcpServers": {
+    "sim-harness": {
+      "command": "/opt/homebrew/bin/node",
+      "args": ["/Users/you/Developer/sim-harness/dist/mcp.js"]
+    }
+  }
+}</code></pre>
+</div>
+
+<div class="panel" id="t-vs" role="tabpanel" hidden>
+  <p><code>.vscode/mcp.json</code> in the workspace:</p>
+  <pre><code>{
+  "servers": {
+    "sim-harness": {
+      "command": "/opt/homebrew/bin/node",
+      "args": ["/Users/you/Developer/sim-harness/dist/mcp.js"]
+    }
+  }
+}</code></pre>
+  <div class="note warn"><p>VS Code's top-level key is <code>servers</code>, not
+    <code>mcpServers</code> as everywhere else. Copying another client's config
+    verbatim will silently fail.</p></div>
+</div>
+
+<div class="panel" id="t-ge" role="tabpanel" hidden>
+  <p>
+    It is an ordinary stdio MCP server, so any compliant client works — Windsurf,
+    Zed, Gemini CLI, opencode, your own. Point it at:
+  </p>
+  <pre><code>command: /opt/homebrew/bin/node
+args:    ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
+  <p>Most clients use the same JSON shape as Claude Desktop. If yours has no MCP
+    support at all, drive the HTTP API directly — see
+    <a href="#reference">Reference</a> — or shell out to the
+    <code>sim-harness</code> CLI, which is equally scriptable.</p>
+</div>
+
+<h3>The tools your agent gets</h3>
+<table>
+  <tr><th>Tool</th><th>Does</th></tr>
+  <tr><td><code>run_ios_test</code></td><td>Queue a run, returns a run id immediately</td></tr>
+  <tr><td><code>wait_for_test_run</code></td><td>Block until it finishes</td></tr>
+  <tr><td><code>get_test_run</code></td><td>Current state, optionally the full trace</td></tr>
+  <tr><td><code>get_test_screenshot</code></td><td>One screenshot, <strong>as an image</strong> the agent can look at</td></tr>
+  <tr><td><code>get_test_report</code></td><td>The markdown write-up for a PR</td></tr>
+  <tr><td><code>list_test_runs</code>, <code>cancel_test_run</code></td><td>Housekeeping</td></tr>
+  <tr><td><code>sim_pool_status</code>, <code>sim_pool_add</code></td><td>Pool state and capacity</td></tr>
+  <tr><td><code>inspect_simulator</code></td><td>Live accessibility tree, for authoring exact steps</td></tr>
+  <tr><td><code>list_uploaded_builds</code>, <code>whoami</code></td><td>Artifacts, and what your token may do</td></tr>
+</table>
+
+<h2 id="first">First run</h2>
+<p>No build needed — this drives the simulator's own Settings app:</p>
+<pre><code>sim-harness submit examples/settings-steps.json --wait</code></pre>
+<p>Or ask your agent, in plain English:</p>
+<pre><code>Run the login flow on a simulator and show me a screenshot of the
+settings screen with dark mode on.</code></pre>
+<p>Everything a run produces lands in <code>~/.sim-harness/runs/&lt;id&gt;/</code>:</p>
+<pre><code>report.md          the evidence write-up
+screenshots/*.png  every named capture, plus final-state
+run.json           full state, including executedSteps and the trace
+app.log            the app's own log output
+build.log          xcodebuild output, when built from source</code></pre>
+
+<h2 id="security">Security</h2>
+<div class="note danger">
+  <p><span class="lbl">Read this before exposing it.</span> Submitting
+  <code>{"project": "App.xcodeproj"}</code> makes the daemon run
+  <code>xcodebuild</code>, and Xcode Run Script build phases execute arbitrary
+  shell <strong>as you</strong>. Anyone who can name a local project has code
+  execution on that Mac. That is inherent to any build service — which is why
+  tokens are scoped rather than all-powerful.</p>
+</div>
+<p>
+  By default the daemon binds <code>127.0.0.1</code> only, and
+  <strong>refuses to bind any wider address while edge authentication is off</strong>.
+</p>
+
+<h3>Scoped tokens</h3>
+<p>Secrets are stored as SHA-256 hashes; the plaintext is shown once, at creation.</p>
+<table>
+  <tr><th>Preset</th><th>Can name local paths</th><th>For</th></tr>
+  <tr><td><code>full</code></td><td><span class="pill ok">yes</span></td><td>Agents on this machine</td></tr>
+  <tr><td><code>remote</code></td><td><span class="pill no">no</span></td><td>Anything off-machine — uploads a built <code>.app</code> instead</td></tr>
+  <tr><td><code>readonly</code></td><td><span class="pill no">no</span></td><td>Polling and reading results only</td></tr>
+</table>
+<pre><code>sim-harness whoami                              # what this token may do
+sim-harness token create cloud --preset remote  # secret printed once
+sim-harness token revoke cloud</code></pre>
+<p>
+  Every submission, upload and refusal is appended to
+  <code>~/.sim-harness/audit.log</code>, tagged with the token that did it.
+</p>
+
+<h3>Reaching it from elsewhere</h3>
+<p>Don't publish it directly. Put an authenticating proxy in front, so unauthenticated traffic never reaches the Mac.</p>
+<table>
+  <tr><th>Mode</th><th>Use for</th></tr>
+  <tr><td><code>cloudflare-access</code></td><td>A client that can't run a VPN — a cloud agent sandbox. The daemon verifies the <code>Cf-Access-Jwt-Assertion</code> JWT itself.</td></tr>
+  <tr><td><code>trusted-proxy</code></td><td>A ZTNA broker or internal reverse proxy — a Netskope Private Access publisher, an internal load balancer.</td></tr>
+</table>
+<pre><code>sim-harness tunnel sim.example.com</code></pre>
+<p>
+  That scaffolds a Cloudflare Tunnel and prints the remaining steps — and
+  deliberately creates nothing in your Cloudflare account.
+</p>
+<div class="note">
+  <p><span class="lbl">Why verify in the origin?</span> If you only trust "it
+  arrived through the tunnel", anyone who reaches the origin by another route
+  walks straight past Access. The daemon checks the signature, issuer, audience
+  and expiry on every request.</p>
+</div>
+<p>
+  On a network that inspects TLS — Netskope, Zscaler and friends — set
+  <code>caBundle</code> to the corporate root CA and re-run
+  <code>./install.sh</code>. Node reads <code>NODE_EXTRA_CA_CERTS</code> once at
+  startup, so it has to be in the launchd plist; <code>doctor</code> warns when
+  the two disagree.
+</p>
+
+<h2 id="deploy">Where to run it</h2>
+<div class="grid">
+  <div class="card">
+    <h3>On your own machine <span class="pill ok">default</span></h3>
+    <p>Agent and pool on the same Mac, talking over loopback. Source never leaves
+      the box and builds stay incremental. If your repos are IP-protected, this is
+      the shape you want — there is no new egress to sanction.</p>
+  </div>
+  <div class="card">
+    <h3>Build here, test there</h3>
+    <p><code>sim-harness upload --scheme App --project App.xcodeproj</code> builds,
+      zips and uploads; the far side references the artifact id. Only the compiled
+      bundle moves, never the source.</p>
+  </div>
+  <div class="card">
+    <h3>A shared team pool</h3>
+    <p>Uploading per run gets wasteful. The efficient shape is the shared Mac
+      fetching a git ref itself, with clients passing only a sha.</p>
+  </div>
+</div>
+
+<h2 id="reference">Reference</h2>
+<h3>CLI</h3>
+<pre><code>sim-harness status                    daemon and pool state
+sim-harness doctor                    toolchain, TLS path, exposure
+sim-harness submit &lt;file.json&gt; --wait queue a run and follow it
+sim-harness watch &lt;run-id&gt;            follow a run
+sim-harness report &lt;run-id&gt;           markdown evidence
+sim-harness inspect &lt;device&gt;          live accessibility tree
+sim-harness upload &lt;App.app&gt;          upload a build, prints an artifact id
+sim-harness pool add -n 2             add simulators
+sim-harness token list|create|revoke  manage access
+sim-harness mcp-config [agent]        MCP setup for your agent
+sim-harness tunnel &lt;hostname&gt;         scaffold Cloudflare Tunnel + Access</code></pre>
+
+<h3>HTTP API</h3>
+<p>Bearer token on every route except <code>/health</code>; each checks a capability.</p>
+<pre><code>POST   /v1/runs                          submit; 202 with the run id
+GET    /v1/runs/:id                      full state
+GET    /v1/runs/:id/wait?timeoutMs=      long-poll until terminal
+GET    /v1/runs/:id/report               markdown
+GET    /v1/runs/:id/screenshots/:name    PNG
+DELETE /v1/runs/:id                      cancel
+POST   /v1/artifacts                     upload a zipped .app
+GET    /v1/pool                          pool state
+GET    /v1/whoami                        this token's capabilities
+GET    /health                           liveness</code></pre>
+
+<h3>Actions available to a step or scenario</h3>
+<p>
+  <code>tap</code> (by <code>id</code>, <code>label</code>, <code>value</code> or
+  <code>x</code>/<code>y</code>), <code>type</code>, <code>clear_text</code>,
+  <code>press_enter</code>, <code>swipe</code>, <code>gesture</code>,
+  <code>button</code>, <code>wait</code>, <code>wait_for</code>,
+  <code>screenshot</code>, <code>open_url</code>, <code>appearance</code>,
+  <code>permission</code>, <code>launch</code>, <code>relaunch</code>,
+  <code>terminate</code>, <code>describe_ui</code>.
+</p>
+<div class="note">
+  <p>Prefer <code>id</code> over <code>label</code> over coordinates. SwiftUI needs
+  an explicit <code>.accessibilityIdentifier(...)</code> for <code>id</code>
+  targeting to work — worth adding as you go, since it makes every future test
+  cheaper.</p>
+</div>
+
+<footer>
+  sim-harness · <code>~/Developer/sim-harness</code> · see <code>README.md</code>
+  for full configuration, and <code>config.example.json</code> for every setting.
+</footer>
+
+</main>
+</div>
+
+<script>
+  // Tabs
+  const tablist = document.querySelector('.tabs');
+  if (tablist) {
+    const tabs = [...tablist.querySelectorAll('button')];
+    const show = (btn) => {
+      tabs.forEach((t) => {
+        const on = t === btn;
+        t.setAttribute('aria-selected', String(on));
+        document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+      });
+    };
+    tabs.forEach((t) => t.addEventListener('click', () => show(t)));
+    tablist.addEventListener('keydown', (e) => {
+      const i = tabs.indexOf(document.activeElement);
+      if (i < 0) return;
+      const next = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : -1;
+      if (next < 0) return;
+      e.preventDefault();
+      const t = tabs[(next + tabs.length) % tabs.length];
+      t.focus(); show(t);
+    });
+  }
+
+  // Copy buttons
+  document.querySelectorAll('pre').forEach((pre) => {
+    const b = document.createElement('button');
+    b.className = 'copy';
+    b.textContent = 'copy';
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(pre.querySelector('code').innerText);
+        b.textContent = 'copied'; b.classList.add('done');
+        setTimeout(() => { b.textContent = 'copy'; b.classList.remove('done'); }, 1400);
+      } catch { b.textContent = 'press ⌘C'; }
+    });
+    pre.appendChild(b);
+  });
+
+  // Highlight the section you are reading
+  const links = [...document.querySelectorAll('nav.toc a')];
+  const byId = new Map(links.map((a) => [a.getAttribute('href').slice(1), a]));
+  const seen = new Set();
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => e.isIntersecting ? seen.add(e.target.id) : seen.delete(e.target.id));
+    const first = [...byId.keys()].find((id) => seen.has(id));
+    links.forEach((a) => a.classList.toggle('on', a === byId.get(first)));
+  }, { rootMargin: '0px 0px -70% 0px' });
+  byId.forEach((_, id) => { const el = document.getElementById(id); if (el) io.observe(el); });
+</script>
+</body>
+</html>
