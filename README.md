@@ -2,9 +2,10 @@
 
 Hand off iOS testing to a pool of pre-booted simulators.
 
-**[Documentation](docs/index.html)** — features, how it works, and setup for
-Claude Code, Claude Desktop, Codex, Cursor, VS Code and any other MCP agent.
-Open it with `simcheck docs`.
+**[Documentation](https://nickbabenko.github.io/Simcheck/)** — features, how it
+works, and setup for Claude Code, Claude Desktop, Codex, Cursor, VS Code and any
+other MCP agent. Also available offline: `simcheck docs` opens the same page
+from your checkout, no network needed.
 
 An agent submits a build, a test scenario and the screenshots it wants back.
 The harness leases a warm simulator, installs the app, drives the UI, captures
@@ -706,7 +707,7 @@ build.log                xcodebuild output, when built from source
 | `src/oauth.ts` | OAuth 2.1 authorization server with pairing-code consent |
 | `src/cli.ts` | `simcheck` |
 | `examples/DemoApp/` | A tiny SwiftUI app to test the harness against |
-| `docs/index.html` | The documentation page (`simcheck docs`) |
+| `docs/index.html` | The documentation page — served at [nickbabenko.github.io/Simcheck](https://nickbabenko.github.io/Simcheck/), opened locally by `simcheck docs` |
 
 ## Troubleshooting
 
