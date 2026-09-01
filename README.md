@@ -1,10 +1,10 @@
-# sim-harness
+# simcheck
 
 Hand off iOS testing to a pool of pre-booted simulators.
 
 **[Documentation](docs/index.html)** — features, how it works, and setup for
 Claude Code, Claude Desktop, Codex, Cursor, VS Code and any other MCP agent.
-Open it with `sim-harness docs`.
+Open it with `simcheck docs`.
 
 An agent submits a build, a test scenario and the screenshots it wants back.
 The harness leases a warm simulator, installs the app, drives the UI, captures
@@ -27,12 +27,12 @@ screenshot of the toggle in its new state.
 ## Install
 
 ```bash
-git clone <this repo> ~/Developer/sim-harness && cd ~/Developer/sim-harness
+git clone <this repo> ~/Developer/simcheck && cd ~/Developer/simcheck
 ./install.sh
 ```
 
 That checks your toolchain, installs the [AXe](https://github.com/cameroncooke/AXe)
-simulator driver via Homebrew, builds, links `sim-harness` into `~/.local/bin`,
+simulator driver via Homebrew, builds, links `simcheck` into `~/.local/bin`,
 registers a launchd agent so the pool is warm after a reboot, installs the
 `ios-sim-test` Claude skill, and registers the MCP server with Claude Code.
 
@@ -48,13 +48,13 @@ and Homebrew (only to install AXe).
 ## Use it
 
 ```bash
-sim-harness status                              # daemon and pool
-sim-harness submit examples/demo-steps.json --wait
-sim-harness report <run-id>                     # markdown evidence
-sim-harness inspect sim-harness-01              # live screen, for authoring steps
-sim-harness upload build/App.app                # returns an artifact id
-sim-harness whoami                              # capabilities of the current token
-sim-harness doctor                              # toolchain, TLS path, exposure
+simcheck status                              # daemon and pool
+simcheck submit examples/demo-steps.json --wait
+simcheck report <run-id>                     # markdown evidence
+simcheck inspect simcheck-01              # live screen, for authoring steps
+simcheck upload build/App.app                # returns an artifact id
+simcheck whoami                              # capabilities of the current token
+simcheck doctor                              # toolchain, TLS path, exposure
 ```
 
 Tests: `npm test` — 25 cases covering Cloudflare Access JWT verification against
@@ -165,18 +165,18 @@ Useful when no agent is in the loop — a nightly build, say. Per-repo setup is
 one curl, using a long-lived token in CI secrets.
 
 ```yaml
-- name: Push the build to sim-harness
+- name: Push the build to simcheck
   run: |
     ditto -c -k --keepParent "$APP_PATH" App.zip
-    curl -sS -X POST "$SIM_HARNESS_URL/upload?label=$GITHUB_REF_NAME" \
-      -H "Authorization: Bearer $SIM_HARNESS_TOKEN" \
+    curl -sS -X POST "$SIMCHECK_URL/upload?label=$GITHUB_REF_NAME" \
+      -H "Authorization: Bearer $SIMCHECK_TOKEN" \
       -H "Content-Type: application/zip" \
       --data-binary @App.zip
 ```
 
 It returns JSON with an `id`; the agent then runs
 `{"app": {"artifactId": "<id>"}}`. Mint the CI token with
-`sim-harness token create ci --preset remote` — it needs `artifacts:write`, and
+`simcheck token create ci --preset remote` — it needs `artifacts:write`, and
 deliberately cannot trigger a local build.
 
 Ask the `get_upload_command` MCP tool and it prints this snippet with your real
@@ -253,9 +253,9 @@ job, and `recycling` while being reset. Runs queue as `pending` until a matching
 device is free, so pool size is the concurrency limit.
 
 ```bash
-sim-harness pool                      # state
-sim-harness pool add -n 2             # added as pending, booted shortly after
-sim-harness pool remove <udid>
+simcheck pool                      # state
+simcheck pool add -n 2             # added as pending, booted shortly after
+simcheck pool remove <udid>
 ```
 
 ### A pool of more than one runtime
@@ -280,7 +280,7 @@ what is available, rather than queueing for ever.
 Each warm simulator costs roughly 3 GB of disk, so size this against the space
 you have.
 
-**The pool only ever touches simulators named `sim-harness-*`.** Simulators you
+**The pool only ever touches simulators named `simcheck-*`.** Simulators you
 use in Xcode are never booted, erased or deleted by this daemon.
 
 Between runs a device is reset by uninstalling the app (fast). Pass
@@ -310,11 +310,11 @@ So the endpoint must be reachable from the public internet. **Tailscale cannot
 serve this** — your phone being on the tailnet is irrelevant, because your phone
 is not what connects. That leaves a tunnel, and therefore real authentication.
 
-`sim-harness remote` is an OAuth 2.1 authorization server plus the MCP endpoint
+`simcheck remote` is an OAuth 2.1 authorization server plus the MCP endpoint
 as a resource server. Two things keep the blast radius small:
 
 - **Authorization needs a pairing code printed on the Mac.** Finding the URL is
-  not enough; you must be able to run `sim-harness pair`. The code is
+  not enough; you must be able to run `simcheck pair`. The code is
   hashed on disk, single use, and expires in ten minutes.
 - **It talks to the daemon with a scoped token.** Point `remoteToken` at a
   `remote` preset token and the connector can never build from a local path —
@@ -324,9 +324,9 @@ as a resource server. Two things keep the blast radius small:
 
 ```bash
 # 1. a token the connector cannot hurt you with
-sim-harness token create phone --preset remote
+simcheck token create phone --preset remote
 
-# 2. tell the harness where it will be published, in ~/.sim-harness/config.json
+# 2. tell the harness where it will be published, in ~/.simcheck/config.json
 #    { "publicUrl": "https://<host>:8443", "remoteToken": "<the secret>" }
 
 # 3. publish it, then register the launchd agent
@@ -336,7 +336,7 @@ sim-harness token create phone --preset remote
 #    URL: https://<host>:8443/mcp
 
 # 5. when Claude shows the consent screen, on the Mac:
-sim-harness pair            # prints e.g. K7QP-3MTX, valid 10 minutes
+simcheck pair            # prints e.g. K7QP-3MTX, valid 10 minutes
 ```
 
 ### Publishing it: Tailscale Funnel
@@ -364,22 +364,22 @@ move it to another port first or it becomes public too:
 
 ```bash
 tailscale serve --bg --https=8443 http://127.0.0.1:<its-port>   # that service, tailnet-only
-tailscale funnel --bg 8830                                       # sim-harness, public 443
+tailscale funnel --bg 8830                                       # simcheck, public 443
 ```
 
 Funnel has no authentication of its own, which is exactly why the pairing code
 and the scoped token matter — they are the only thing between the public
 internet and your Mac.
 
-For Cloudflare instead, `sim-harness tunnel <hostname>` scaffolds it. Note that
+For Cloudflare instead, `simcheck tunnel <hostname>` scaffolds it. Note that
 a tunnel needs a *proxied* CNAME, so do not put it in a namespace your Terraform
 manages as unproxied private records.
 
 Claude registers itself dynamically, so there is no client ID or secret to copy.
 
 ```bash
-sim-harness remote status        # registered clients and live tokens
-sim-harness remote revoke-all    # kill every connector credential at once
+simcheck remote status        # registered clients and live tokens
+simcheck remote revoke-all    # kill every connector credential at once
 ```
 
 `revoke-all` is the thing to run if you lose the phone.
@@ -431,10 +431,10 @@ Three presets:
 - **`readonly`** — poll and read results only.
 
 ```bash
-sim-harness whoami                                   # what the current token may do
-sim-harness token list
-sim-harness token create cloud --preset remote       # prints the secret once
-sim-harness token revoke cloud
+simcheck whoami                                   # what the current token may do
+simcheck token list
+simcheck token create cloud --preset remote       # prints the secret once
+simcheck token revoke cloud
 ```
 
 Managing tokens requires `pool:write`, which no remote preset grants — a remote
@@ -442,14 +442,14 @@ token cannot mint itself a better one.
 
 ### Audit log
 
-Every submission, upload and refusal is appended to `~/.sim-harness/audit.log`
+Every submission, upload and refusal is appended to `~/.simcheck/audit.log`
 as JSONL, tagged with the token that did it.
 
 ```bash
-tail -f ~/.sim-harness/audit.log | jq -r '"\(.at) \(.token) \(.action) \(.outcome)"'
+tail -f ~/.simcheck/audit.log | jq -r '"\(.at) \(.token) \(.action) \(.outcome)"'
 ```
 
-`~/.sim-harness/{token,tokens.json,audit.log}` are all mode 600. Do not print
+`~/.simcheck/{token,tokens.json,audit.log}` are all mode 600. Do not print
 them into a transcript.
 
 ### Exposing it: edge authentication
@@ -467,7 +467,7 @@ that would publish a code-execution surface.
 #### Cloudflare Access
 
 ```bash
-sim-harness tunnel sim.home.nickbabenko.com
+simcheck tunnel sim.home.nickbabenko.com
 ```
 
 That writes a `cloudflared` config and prints the remaining steps. It
@@ -495,7 +495,7 @@ A client then sends three things:
 curl https://sim.home.nickbabenko.com/v1/runs \
   -H "CF-Access-Client-Id: <id>.access" \
   -H "CF-Access-Client-Secret: <secret>" \
-  -H "Authorization: Bearer <sim-harness token>" \
+  -H "Authorization: Bearer <simcheck token>" \
   -d @request.json
 ```
 
@@ -532,7 +532,7 @@ unless it trusts the corporate root:
 
 Then re-run `./install.sh`, which writes it into the launchd plist as
 `NODE_EXTRA_CA_CERTS`. Node reads that variable **once at startup**, so setting
-it later has no effect — `sim-harness doctor` warns when the two disagree.
+it later has no effect — `simcheck doctor` warns when the two disagree.
 
 #### Binding the two credentials together
 
@@ -547,7 +547,7 @@ stolen bearer token is enough alone:
 ### Diagnosing it
 
 ```bash
-sim-harness doctor
+simcheck doctor
 ```
 
 Checks the toolchain, whether your Xcode SDK can actually target your installed
@@ -567,7 +567,7 @@ are IP-protected, this is the shape you want.
 other agent drives the test with a `remote` token:
 
 ```bash
-sim-harness upload --scheme App --project App.xcodeproj --label "fix-toggle"
+simcheck upload --scheme App --project App.xcodeproj --label "fix-toggle"
 # builds for the simulator, zips, uploads, prints an artifact id
 ```
 
@@ -584,13 +584,13 @@ word.
 
 ## Configuration
 
-`~/.sim-harness/config.json`, or `SIM_HARNESS_*` environment variables
-(`SIM_HARNESS_POOL_SIZE`, `SIM_HARNESS_PORT`, ...).
+`~/.simcheck/config.json`, or `SIMCHECK_*` environment variables
+(`SIMCHECK_POOL_SIZE`, `SIMCHECK_PORT`, ...).
 
 There is no config file by default — the daemon runs on the built-in defaults
 below, which means loopback-only with no edge auth. `config.example.json` in
 this repo lists every key with its default; copy it and delete what you do not
-need. `sim-harness doctor` reports what is actually live.
+need. `simcheck doctor` reports what is actually live.
 
 | Key | Default | |
 |---|---|---|
@@ -626,15 +626,15 @@ backend keeps one cached conversation per run:
 
 ```bash
 echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc
-sim-harness stop && sim-harness start
+simcheck stop && simcheck start
 ```
 
-`sim-harness status` reports which backend is live. Explicit `steps` runs never
+`simcheck status` reports which backend is live. Explicit `steps` runs never
 call a model at all.
 
 ## HTTP API
 
-Loopback, bearer token at `~/.sim-harness/token` (mode 600 — do not print it).
+Loopback, bearer token at `~/.simcheck/token` (mode 600 — do not print it).
 
 Every route except `/health` needs `Authorization: Bearer <token>`, and each
 one checks a specific capability.
@@ -668,7 +668,7 @@ broke; it is not a verdict on the app.
 
 ## Artifacts
 
-Everything for a run lands in `~/.sim-harness/runs/<id>/`:
+Everything for a run lands in `~/.simcheck/runs/<id>/`:
 
 ```
 run.json                 full state, including executedSteps and the trace
@@ -704,14 +704,14 @@ build.log                xcodebuild output, when built from source
 | `src/mcp.ts` | stdio entry point, for a local agent |
 | `src/mcp-remote.ts` | remote HTTP entry point, OAuth, and upload tickets |
 | `src/oauth.ts` | OAuth 2.1 authorization server with pairing-code consent |
-| `src/cli.ts` | `sim-harness` |
+| `src/cli.ts` | `simcheck` |
 | `examples/DemoApp/` | A tiny SwiftUI app to test the harness against |
-| `docs/index.html` | The documentation page (`sim-harness docs`) |
+| `docs/index.html` | The documentation page (`simcheck docs`) |
 
 ## Troubleshooting
 
-**Runs stay `pending`.** The pool is busy or still booting — `sim-harness status`.
-Raise `poolSize` or `sim-harness pool add`.
+**Runs stay `pending`.** The pool is busy or still booting — `simcheck status`.
+Raise `poolSize` or `simcheck pool add`.
 
 **`xcodebuild: Unable to find a destination matching...`** Your Xcode is older
 than the installed simulator runtimes. `xcodebuild -showsdks` against
@@ -729,7 +729,7 @@ server.
 
 **A connector reaches consent, then says the request expired immediately.**
 The server restarted mid-flow. Consent state is persisted now, so this should
-not recur; if it does, check `~/.sim-harness/remote.err.log` for a crash loop.
+not recur; if it does, check `~/.simcheck/remote.err.log` for a crash loop.
 
 **`403 lacks the "runs:submit:local" capability`.** That token is scoped for
 remote use and cannot name paths on this Mac. Upload the build and reference it
@@ -738,11 +738,11 @@ by `artifactId`, or use the `local` token.
 **Scenarios are disabled.** No model backend — install the `claude` CLI or set
 `ANTHROPIC_API_KEY`, then restart.
 
-**A tap does nothing.** `sim-harness inspect <device>` and check the element is
+**A tap does nothing.** `simcheck inspect <device>` and check the element is
 really there. SwiftUI needs an explicit `.accessibilityIdentifier(...)` for `id`
 targeting to work.
 
 **`Timed out creating the simulator remote automation session`.** CoreSimulator
 occasionally refuses an automation session on a device that has just booted.
 AXe calls retry this automatically; if it persists, the device is likely wedged
-— `sim-harness pool remove <udid>` and let the pool recreate it.
+— `simcheck pool remove <udid>` and let the pool recreate it.

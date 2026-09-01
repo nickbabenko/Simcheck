@@ -21,10 +21,10 @@ export interface McpServerOptions {
 
 export function createMcpServer(client: Client, opts: McpServerOptions = {}): McpServer {
   const server = new McpServer(
-    { name: 'sim-harness', version: '0.1.0' },
+    { name: 'simcheck', version: '0.1.0' },
     {
       instructions: [
-        'sim-harness runs a build on a pre-booted iOS simulator, drives a test scenario, and returns screenshots as evidence.',
+        'simcheck runs a build on a pre-booted iOS simulator, drives a test scenario, and returns screenshots as evidence.',
         '',
         'Use it to prove a UI change actually works before asking for PR review, rather than asserting it does.',
         '',
@@ -285,7 +285,7 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     '# 1. In CI, after building for the simulator:',
     'ditto -c -k --keepParent "$APP_PATH" App.zip',
     `curl -sS -X POST "${url}${label ? `?label=${encodeURIComponent(label)}` : '?label=$GITHUB_REF_NAME'}" \\`,
-    '  -H "Authorization: Bearer $SIM_HARNESS_TOKEN" \\',
+    '  -H "Authorization: Bearer $SIMCHECK_TOKEN" \\',
     '  -H "Content-Type: application/zip" \\',
     '  --data-binary @App.zip',
     '',
@@ -293,7 +293,7 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     '#   run_ios_test { "app": { "artifactId": "<id>" }, "scenario": "...", "screenshots": [...] }',
     '',
     '# The CI token needs the artifacts:write capability:',
-    '#   sim-harness token create ci --preset remote',
+    '#   simcheck token create ci --preset remote',
     '# An .ipa will not work -- build with -destination "generic/platform=iOS Simulator".',
   ].join('\n') }] };
 });
@@ -313,7 +313,7 @@ server.registerTool('whoami', {
   server.registerTool('inspect_simulator', {
     title: 'Inspect a simulator screen',
     description: 'Live accessibility tree of a pooled simulator: every element with its type, label, identifier and tap coordinates. Use this to author exact `steps` for a deterministic run.',
-    inputSchema: { device: z.string().describe('Pool device name (e.g. "sim-harness-01") or its UDID.') },
+    inputSchema: { device: z.string().describe('Pool device name (e.g. "simcheck-01") or its UDID.') },
   }, async ({ device }) => json(await client.inspect(device)));
 
   return server;

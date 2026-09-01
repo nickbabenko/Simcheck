@@ -7,7 +7,7 @@
 | `demo-steps.json` | yes | Builds `DemoApp/` from source and drives a sign-in flow. Exercises the `xcodebuild` path. |
 
 ```bash
-sim-harness submit examples/settings-steps.json --wait
+simcheck submit examples/settings-steps.json --wait
 ```
 
 Relative paths inside a request file resolve against the file, not your shell's

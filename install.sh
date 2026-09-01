@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-command install for sim-harness.
+# One-command install for simcheck.
 #
 #   ./install.sh              full install
 #   ./install.sh --no-daemon  set everything up but do not start the daemon
@@ -10,13 +10,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LABEL="com.nickbabenko.sim-harness"
+LABEL="com.nickbabenko.simcheck"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-REMOTE_LABEL="com.nickbabenko.sim-harness-remote"
+REMOTE_LABEL="com.nickbabenko.simcheck-remote"
 REMOTE_PLIST="$HOME/Library/LaunchAgents/$REMOTE_LABEL.plist"
 BINDIR="$HOME/.local/bin"
 SKILLDIR="$HOME/.claude/skills/ios-sim-test"
-HARNESS_HOME="${SIM_HARNESS_HOME:-$HOME/.sim-harness}"
+HARNESS_HOME="${SIMCHECK_HOME:-$HOME/.simcheck}"
 
 WANT_DAEMON=1; WANT_MCP=1; UNINSTALL=0
 for arg in "$@"; do
@@ -36,16 +36,16 @@ die()  { printf '\033[1;31mx\033[0m  %s\n' "$*" >&2; exit 1; }
 
 # --------------------------------------------------------------- uninstall --
 if [ "$UNINSTALL" = 1 ]; then
-  say "Removing sim-harness"
+  say "Removing simcheck"
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$PLIST" && ok "launchd agent removed"
   launchctl bootout "gui/$(id -u)/$REMOTE_LABEL" 2>/dev/null || true
   rm -f "$REMOTE_PLIST" && ok "remote MCP agent removed"
   command -v tailscale >/dev/null && { tailscale funnel --https=8443 off >/dev/null 2>&1 || true; ok "tailscale funnel on 8443 disabled"; }
-  rm -f "$BINDIR/sim-harness" "$BINDIR/sim-harness-mcp" && ok "symlinks removed"
+  rm -f "$BINDIR/simcheck" "$BINDIR/simcheck-mcp" && ok "symlinks removed"
   rm -rf "$SKILLDIR" && ok "skill removed"
-  command -v claude >/dev/null && { claude mcp remove sim-harness --scope user >/dev/null 2>&1 || true; ok "MCP entry removed"; }
-  warn "left alone: $HARNESS_HOME (runs and token) and any sim-harness-* simulators"
+  command -v claude >/dev/null && { claude mcp remove simcheck --scope user >/dev/null 2>&1 || true; ok "MCP entry removed"; }
+  warn "left alone: $HARNESS_HOME (runs and token) and any simcheck-* simulators"
   echo "    delete those with: rm -rf $HARNESS_HOME  &&  xcrun simctl delete <udid>"
   exit 0
 fi
@@ -53,7 +53,7 @@ fi
 # ------------------------------------------------------------ prerequisites --
 say "Checking prerequisites"
 
-[ "$(uname -s)" = "Darwin" ] || die "sim-harness drives iOS simulators, so it only runs on macOS."
+[ "$(uname -s)" = "Darwin" ] || die "simcheck drives iOS simulators, so it only runs on macOS."
 
 command -v node >/dev/null || die "node is not installed. Try: brew install node"
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
@@ -91,9 +91,9 @@ ok "built to $REPO/dist"
 # ---------------------------------------------------------------- symlinks --
 say "Linking commands into $BINDIR"
 mkdir -p "$BINDIR"
-ln -sf "$REPO/dist/cli.js" "$BINDIR/sim-harness"
-ln -sf "$REPO/dist/mcp.js" "$BINDIR/sim-harness-mcp"
-ok "sim-harness, sim-harness-mcp"
+ln -sf "$REPO/dist/cli.js" "$BINDIR/simcheck"
+ln -sf "$REPO/dist/mcp.js" "$BINDIR/simcheck-mcp"
+ok "simcheck, simcheck-mcp"
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
   *) warn "$BINDIR is not on your PATH. Add this to ~/.zshrc:"
@@ -139,7 +139,7 @@ if [ "$WANT_DAEMON" = 1 ]; then
   <dict>
     <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>$HOME</string>
-    <key>SIM_HARNESS_HOME</key><string>$HARNESS_HOME</string>${CA_BUNDLE:+
+    <key>SIMCHECK_HOME</key><string>$HARNESS_HOME</string>${CA_BUNDLE:+
     <key>NODE_EXTRA_CA_CERTS</key><string>$CA_BUNDLE</string>}${ANTHROPIC_API_KEY:+
     <key>ANTHROPIC_API_KEY</key><string>$ANTHROPIC_API_KEY</string>}
   </dict>
@@ -164,10 +164,10 @@ PLISTEOF
     ok "daemon registered and starting"
   else
     launchctl bootstrap "gui/$(id -u)" "$PLIST" || true
-    die "could not register the launchd agent. Run it in the foreground instead: sim-harness start --foreground"
+    die "could not register the launchd agent. Run it in the foreground instead: simcheck start --foreground"
   fi
 else
-  warn "skipped the daemon; start it by hand with: sim-harness start --foreground"
+  warn "skipped the daemon; start it by hand with: simcheck start --foreground"
 fi
 
 # --------------------------------------------------- remote MCP (optional) --
@@ -198,7 +198,7 @@ if [ -n "$PUBLIC_URL" ] && [ "$WANT_DAEMON" = 1 ]; then
   <dict>
     <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>$HOME</string>
-    <key>SIM_HARNESS_HOME</key><string>$HARNESS_HOME</string>
+    <key>SIMCHECK_HOME</key><string>$HARNESS_HOME</string>
   </dict>
   <key>StandardOutPath</key><string>$HARNESS_HOME/remote.out.log</string>
   <key>StandardErrorPath</key><string>$HARNESS_HOME/remote.err.log</string>
@@ -223,12 +223,12 @@ ok "$SKILLDIR"
 if [ "$WANT_MCP" = 1 ]; then
   if command -v claude >/dev/null; then
     say "Registering the MCP server with Claude Code"
-    claude mcp remove sim-harness --scope user >/dev/null 2>&1 || true
-    claude mcp add sim-harness --scope user -- "$(command -v node)" "$REPO/dist/mcp.js"
-    ok "available to every Claude Code session as 'sim-harness'"
+    claude mcp remove simcheck --scope user >/dev/null 2>&1 || true
+    claude mcp add simcheck --scope user -- "$(command -v node)" "$REPO/dist/mcp.js"
+    ok "available to every Claude Code session as 'simcheck'"
   else
     warn "claude CLI not found; register the MCP server yourself with:"
-    echo "        claude mcp add sim-harness --scope user -- $(command -v node) $REPO/dist/mcp.js"
+    echo "        claude mcp add simcheck --scope user -- $(command -v node) $REPO/dist/mcp.js"
   fi
 fi
 
@@ -236,26 +236,26 @@ fi
 if [ "$WANT_DAEMON" = 1 ]; then
   say "Waiting for the daemon"
   for _ in $(seq 1 30); do
-    if "$BINDIR/sim-harness" status >/dev/null 2>&1; then break; fi
+    if "$BINDIR/simcheck" status >/dev/null 2>&1; then break; fi
     sleep 1
   done
   echo
-  "$BINDIR/sim-harness" status || warn "daemon did not come up; check: sim-harness logs"
+  "$BINDIR/simcheck" status || warn "daemon did not come up; check: simcheck logs"
 fi
 
 cat <<DONE
 
 $(printf '\033[1;32mInstalled.\033[0m')
 
-  sim-harness doctor                    toolchain, TLS path and exposure
-  sim-harness status                    pool and daemon state
-  sim-harness submit examples/settings-steps.json --wait
-  sim-harness logs -f                   watch it work
+  simcheck doctor                    toolchain, TLS path and exposure
+  simcheck status                    pool and daemon state
+  simcheck submit examples/settings-steps.json --wait
+  simcheck logs -f                   watch it work
 
 The pool warms in the background; the first simulator takes about a minute to
 boot. Natural-language scenarios work out of the box through your Claude Code
 login, but are much cheaper and faster with an API key:
 
-  echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc && sim-harness stop && sim-harness start
+  echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc && simcheck stop && simcheck start
 
 DONE

@@ -104,7 +104,7 @@ export interface Config {
   artifactRetentionDays: number;
 }
 
-const HOME = process.env.SIM_HARNESS_HOME || path.join(os.homedir(), '.sim-harness');
+const HOME = process.env.SIMCHECK_HOME || path.join(os.homedir(), '.simcheck');
 
 const DEFAULTS: Config = {
   home: HOME,
@@ -117,7 +117,7 @@ const DEFAULTS: Config = {
   minFreeDiskGb: 6,
   deviceType: 'iPhone 17 Pro',
   runtime: '',                 // '' = newest available iOS runtime
-  devicePrefix: 'sim-harness',
+  devicePrefix: 'simcheck',
   defaultTimeoutMs: 10 * 60_000,
   defaultMaxActions: 60,
   defaultResetPolicy: 'uninstall',
@@ -149,7 +149,7 @@ const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
   'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb']);
 
-/** Precedence: env > ~/.sim-harness/config.json > defaults. */
+/** Precedence: env > ~/.simcheck/config.json > defaults. */
 export function loadConfig(): Config {
   const cfg: Config = { ...DEFAULTS };
   const file = path.join(HOME, 'config.json');
@@ -161,7 +161,7 @@ export function loadConfig(): Config {
     }
   }
   for (const key of Object.keys(DEFAULTS) as (keyof Config)[]) {
-    const env = process.env[`SIM_HARNESS_${camelToSnake(key)}`];
+    const env = process.env[`SIMCHECK_${camelToSnake(key)}`];
     if (env === undefined) continue;
     (cfg as unknown as Record<string, unknown>)[key] = NUMERIC.has(key) ? Number(env)
       : LIST.has(key) ? env.split(',').map((v) => v.trim()).filter(Boolean)
@@ -200,7 +200,7 @@ export function ensureToken(cfg: Config): string {
 
 export function readToken(cfg: Config): string | null {
   const p = paths(cfg).token;
-  if (process.env.SIM_HARNESS_TOKEN) return process.env.SIM_HARNESS_TOKEN;
+  if (process.env.SIMCHECK_TOKEN) return process.env.SIMCHECK_TOKEN;
   if (!fs.existsSync(p)) return null;
   return fs.readFileSync(p, 'utf8').trim() || null;
 }

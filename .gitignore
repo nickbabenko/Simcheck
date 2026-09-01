@@ -4,7 +4,7 @@ dist/
 .DS_Store
 
 # A real config holds the daemon API token and the remote MCP token. The live
-# one lives in ~/.sim-harness/, but guard against a copy landing here.
+# one lives in ~/.simcheck/, but guard against a copy landing here.
 config.json
 .env
 .env.*

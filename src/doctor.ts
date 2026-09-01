@@ -99,7 +99,7 @@ async function probeTls(host: string): Promise<Check> {
           name: `TLS to ${host}`, state: 'fail',
           detail: `certificate rejected: ${socket.authorizationError}. Chain signed by ${rootName}`,
           fix: intercepted
-            ? `TLS is being inspected by ${rootName}. Export its root CA and set "caBundle" in ~/.sim-harness/config.json, then re-run ./install.sh`
+            ? `TLS is being inspected by ${rootName}. Export its root CA and set "caBundle" in ~/.simcheck/config.json, then re-run ./install.sh`
             : 'check the system trust store',
         });
       }

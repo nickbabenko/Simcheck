@@ -2,7 +2,7 @@ import fs from 'node:fs';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 const ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
-const threshold = ORDER[(process.env.SIM_HARNESS_LOG_LEVEL as Level) || 'info'] ?? 20;
+const threshold = ORDER[(process.env.SIMCHECK_LOG_LEVEL as Level) || 'info'] ?? 20;
 
 let sink: fs.WriteStream | null = null;
 

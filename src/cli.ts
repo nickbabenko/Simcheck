@@ -10,54 +10,54 @@ import type { RunRequest } from './types.js';
 const cfg = loadConfig();
 const client = new Client(cfg);
 
-const USAGE = `sim-harness - hand off iOS simulator testing
+const USAGE = `simcheck - hand off iOS simulator testing
 
-  sim-harness start [--foreground]     start the daemon (launchd by default)
-  sim-harness stop                     stop the daemon
-  sim-harness status                   daemon health and pool state
-  sim-harness logs [-f]                tail the daemon log
+  simcheck start [--foreground]     start the daemon (launchd by default)
+  simcheck stop                     stop the daemon
+  simcheck status                   daemon health and pool state
+  simcheck logs [-f]                tail the daemon log
 
-  sim-harness submit <request.json>    queue a run; prints the run id
+  simcheck submit <request.json>    queue a run; prints the run id
        [--wait] [--timeout <sec>]      block until it finishes
-  sim-harness get <run-id>             full run state as JSON
-  sim-harness watch <run-id>           follow a run until it finishes
-  sim-harness list [-n <count>]        recent runs
-  sim-harness cancel <run-id>          stop a run
-  sim-harness report <run-id>          print the markdown evidence report
-  sim-harness open <run-id>            open the run directory in Finder
+  simcheck get <run-id>             full run state as JSON
+  simcheck watch <run-id>           follow a run until it finishes
+  simcheck list [-n <count>]        recent runs
+  simcheck cancel <run-id>          stop a run
+  simcheck report <run-id>          print the markdown evidence report
+  simcheck open <run-id>            open the run directory in Finder
 
-  sim-harness upload <App.app|zip>     upload a built app; prints an artifact id
-  sim-harness upload --scheme <S> [--project <P>|--workspace <W>]
+  simcheck upload <App.app|zip>     upload a built app; prints an artifact id
+  simcheck upload --scheme <S> [--project <P>|--workspace <W>]
                                        build it here, then upload
        [--label <text>] [--git-sha <sha>]
-  sim-harness artifacts                list uploaded builds
+  simcheck artifacts                list uploaded builds
 
-  sim-harness doctor                   check toolchain, TLS path and exposure
-  sim-harness mcp-config [agent]       MCP setup for claude-code, claude-desktop,
+  simcheck doctor                   check toolchain, TLS path and exposure
+  simcheck mcp-config [agent]       MCP setup for claude-code, claude-desktop,
                                        codex, cursor, vscode, or generic
-  sim-harness docs                     open the documentation page
+  simcheck docs                     open the documentation page
 
-  sim-harness remote                   run the remote MCP server (for Claude
+  simcheck remote                   run the remote MCP server (for Claude
                                        connectors, incl. the phone app)
-  sim-harness pair                     print a pairing code to approve a connector
-  sim-harness remote status            OAuth clients and tokens
-  sim-harness remote clients           registered connectors
-  sim-harness remote revoke <clientId> drop one connector
-  sim-harness remote revoke-all        drop every connector credential
-  sim-harness tunnel <hostname>        scaffold a Cloudflare Tunnel + Access setup
+  simcheck pair                     print a pairing code to approve a connector
+  simcheck remote status            OAuth clients and tokens
+  simcheck remote clients           registered connectors
+  simcheck remote revoke <clientId> drop one connector
+  simcheck remote revoke-all        drop every connector credential
+  simcheck tunnel <hostname>        scaffold a Cloudflare Tunnel + Access setup
 
-  sim-harness token                    print the local API token (secret)
-  sim-harness token list               registered tokens and their capabilities
-  sim-harness token create <name> [--preset full|remote|readonly]
+  simcheck token                    print the local API token (secret)
+  simcheck token list               registered tokens and their capabilities
+  simcheck token create <name> [--preset full|remote|readonly]
        [--note <text>] [--max-concurrent <n>] [--max-per-hour <n>]
-  sim-harness token grant <name> <capability>
-  sim-harness token revoke <name>
-  sim-harness whoami                   what the current token may do
+  simcheck token grant <name> <capability>
+  simcheck token revoke <name>
+  simcheck whoami                   what the current token may do
 
-  sim-harness pool                     pool state
-  sim-harness pool add [-n <count>] [--device "iPhone 17 Pro"] [--runtime "iOS 27.0"]
-  sim-harness pool remove <udid> [--force]
-  sim-harness inspect <device|udid>    live accessibility tree, for authoring steps
+  simcheck pool                     pool state
+  simcheck pool add [-n <count>] [--device "iPhone 17 Pro"] [--runtime "iOS 27.0"]
+  simcheck pool remove <udid> [--force]
+  simcheck inspect <device|udid>    live accessibility tree, for authoring steps
 
 `;
 
@@ -115,7 +115,7 @@ function need(index: number, what: string): string {
 
 const print = (v: unknown) => console.log(JSON.stringify(v, null, 2));
 
-const PLIST_LABEL = 'com.nickbabenko.sim-harness';
+const PLIST_LABEL = 'com.nickbabenko.simcheck';
 const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
 
 async function start(): Promise<void> {
@@ -126,12 +126,12 @@ async function start(): Promise<void> {
     return;
   }
   if (!fs.existsSync(plistPath)) {
-    console.error(`no launchd agent at ${plistPath}. Run ./install.sh, or use: sim-harness start --foreground`);
+    console.error(`no launchd agent at ${plistPath}. Run ./install.sh, or use: simcheck start --foreground`);
     process.exit(1);
   }
   await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath], true);
   await launchctl(['kickstart', '-k', `gui/${process.getuid?.() ?? 501}/${PLIST_LABEL}`]);
-  console.log('daemon starting; run `sim-harness status` in a few seconds');
+  console.log('daemon starting; run `simcheck status` in a few seconds');
 }
 
 async function stop(): Promise<void> {
@@ -156,7 +156,7 @@ async function status(): Promise<void> {
   const health = await client.health().catch(() => null);
   if (!health) {
     console.log(`daemon:  DOWN (${baseUrl(cfg)})`);
-    console.log('         start it with: sim-harness start');
+    console.log('         start it with: simcheck start');
     process.exit(1);
   }
   const p = await client.pool();
@@ -199,7 +199,7 @@ async function submit(): Promise<void> {
   const run = await client.submit(request);
   if (!flag('wait')) {
     console.log(run.id);
-    console.error(`queued at position ${run.queuePosition ?? 0}; follow with: sim-harness watch ${run.id}`);
+    console.error(`queued at position ${run.queuePosition ?? 0}; follow with: simcheck watch ${run.id}`);
     return;
   }
   await watch(run.id);
@@ -365,7 +365,7 @@ async function upload(): Promise<void> {
     zipPath = appPath;
   } else {
     if (!appPath.endsWith('.app')) { console.error(`expected a .app bundle, got ${appPath}`); process.exit(1); }
-    zipPath = path.join(os.tmpdir(), `sim-harness-${path.basename(appPath, '.app')}-${Date.now()}.zip`);
+    zipPath = path.join(os.tmpdir(), `simcheck-${path.basename(appPath, '.app')}-${Date.now()}.zip`);
     cleanup = zipPath;
     console.error(`zipping ${path.basename(appPath)}...`);
     await run('/usr/bin/ditto', ['-c', '-k', '--keepParent', appPath, zipPath]);
@@ -395,7 +395,7 @@ async function buildForUpload(scheme: string): Promise<string> {
     process.exit(1);
   }
   const configuration = opt('configuration') ?? 'Debug';
-  const derived = path.join(os.tmpdir(), `sim-harness-build-${Buffer.from(String(project ?? workspace) + scheme).toString('hex').slice(0, 12)}`);
+  const derived = path.join(os.tmpdir(), `simcheck-build-${Buffer.from(String(project ?? workspace) + scheme).toString('hex').slice(0, 12)}`);
 
   console.error(`building ${scheme} (${configuration}) for the simulator...`);
   await run('xcodebuild', [
@@ -447,7 +447,7 @@ async function doctor(): Promise<void> {
   console.log('');
   console.log(health
     ? `  ok   daemon                 up, edge auth "${(health as { edge?: string }).edge ?? 'none'}", ${health.pool} pooled device(s)`
-    : `  FAIL daemon                 not responding -- sim-harness start`);
+    : `  FAIL daemon                 not responding -- simcheck start`);
   if (!health) failed++;
 
   process.exit(failed ? 1 : 0);
@@ -462,7 +462,7 @@ async function doctor(): Promise<void> {
  */
 async function tunnel(): Promise<void> {
   const hostname = need(1, 'public hostname, e.g. sim.home.nickbabenko.com');
-  const name = opt('name') ?? 'sim-harness';
+  const name = opt('name') ?? 'simcheck';
   const dir = path.join(os.homedir(), '.cloudflared');
   const configPath = path.join(dir, `${name}.yml`);
 
@@ -472,7 +472,7 @@ async function tunnel(): Promise<void> {
 
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(configPath, [
-    `# sim-harness tunnel -- generated by \`sim-harness tunnel ${hostname}\``,
+    `# simcheck tunnel -- generated by \`simcheck tunnel ${hostname}\``,
     `tunnel: ${name}`,
     `credentials-file: ${path.join(dir, '<TUNNEL-UUID>.json')}`,
     '',
@@ -508,10 +508,10 @@ async function tunnel(): Promise<void> {
     edgeAllowLoopback: true,
   }, null, 2).split('\n').map((l) => '     ' + l).join('\n'));
   console.log('');
-  console.log('  7. sim-harness stop && sim-harness start && sim-harness doctor');
+  console.log('  7. simcheck stop && simcheck start && simcheck doctor');
   console.log('');
   console.log('  8. Mint a matching token for the far side:');
-  console.log('       sim-harness token create cloud --preset remote');
+  console.log('       simcheck token create cloud --preset remote');
   console.log('');
   console.log('  The client then sends three headers:');
   console.log('       CF-Access-Client-Id, CF-Access-Client-Secret, Authorization: Bearer <token>');
@@ -543,12 +543,12 @@ function mcpConfig(): void {
   const agent = (args[1] ?? 'all').toLowerCase();
 
   const json = (key: string) => JSON.stringify(
-    { [key]: { 'sim-harness': { command: node, args: [server] } } }, null, 2);
+    { [key]: { 'simcheck': { command: node, args: [server] } } }, null, 2);
 
   const blocks: Record<string, () => void> = {
     'claude-code': () => {
       section('Claude Code', 'run this once; it applies to every session');
-      console.log(`claude mcp add sim-harness --scope user -- ${node} ${server}`);
+      console.log(`claude mcp add simcheck --scope user -- ${node} ${server}`);
     },
     'claude-desktop': () => {
       section('Claude Desktop', '~/Library/Application Support/Claude/claude_desktop_config.json');
@@ -557,8 +557,8 @@ function mcpConfig(): void {
     },
     codex: () => {
       section('Codex', '~/.codex/config.toml');
-      console.log(`[mcp_servers.sim-harness]\ncommand = ${JSON.stringify(node)}\nargs = [${JSON.stringify(server)}]`);
-      console.log(`\nor: codex mcp add sim-harness -- ${node} ${server}`);
+      console.log(`[mcp_servers.simcheck]\ncommand = ${JSON.stringify(node)}\nargs = [${JSON.stringify(server)}]`);
+      console.log(`\nor: codex mcp add simcheck -- ${node} ${server}`);
     },
     cursor: () => {
       section('Cursor', '~/.cursor/mcp.json (global) or .cursor/mcp.json (per project)');
@@ -578,7 +578,7 @@ function mcpConfig(): void {
 
   if (agent === 'all') {
     for (const render of Object.values(blocks)) { render(); console.log(''); }
-    console.error('Pick one with: sim-harness mcp-config <claude-code|claude-desktop|codex|cursor|vscode|generic>');
+    console.error('Pick one with: simcheck mcp-config <claude-code|claude-desktop|codex|cursor|vscode|generic>');
     return;
   }
   const render = blocks[agent];
@@ -610,9 +610,9 @@ function openDocs(): void {
  * merely reaches the public OAuth endpoint from completing an authorization.
  */
 async function pair(): Promise<void> {
-  const { SimHarnessOAuth } = await import('./oauth.js');
+  const { SimcheckOAuth } = await import('./oauth.js');
   const { SCOPES } = await import('./mcp-remote.js');
-  const oauth = new SimHarnessOAuth(cfg, SCOPES);
+  const oauth = new SimcheckOAuth(cfg, SCOPES);
   const { code, expiresAt } = oauth.issuePairingCode();
 
   console.error('Enter this on the Claude consent screen:');
@@ -625,11 +625,11 @@ async function pair(): Promise<void> {
 
 async function remote(): Promise<void> {
   const sub = args[1];
-  const { SimHarnessOAuth } = await import('./oauth.js');
+  const { SimcheckOAuth } = await import('./oauth.js');
   const { SCOPES } = await import('./mcp-remote.js');
 
   if (sub === 'status') {
-    const oauth = new SimHarnessOAuth(cfg, SCOPES);
+    const oauth = new SimcheckOAuth(cfg, SCOPES);
     print({
       publicUrl: cfg.publicUrl || null,
       connectorUrl: cfg.publicUrl ? new URL('/mcp', cfg.publicUrl).href : null,
@@ -640,7 +640,7 @@ async function remote(): Promise<void> {
     return;
   }
   if (sub === 'clients') {
-    const rows = new SimHarnessOAuth(cfg, SCOPES).listClients();
+    const rows = new SimcheckOAuth(cfg, SCOPES).listClients();
     if (!rows.length) return void console.log('no connectors registered');
     for (const r of rows) {
       console.log(`${r.clientId}  ${r.name.padEnd(18)} ${r.issuedAt?.slice(0, 19).replace('T', ' ') ?? ''}`);
@@ -648,14 +648,14 @@ async function remote(): Promise<void> {
     return;
   }
   if (sub === 'revoke') {
-    const id = need(2, 'client id (see: sim-harness remote clients)');
-    const gone = new SimHarnessOAuth(cfg, SCOPES).revokeClient(id);
+    const id = need(2, 'client id (see: simcheck remote clients)');
+    const gone = new SimcheckOAuth(cfg, SCOPES).revokeClient(id);
     if (!gone) { console.error(`no connector ${id}`); process.exit(1); }
     console.log(`revoked ${id}`);
     return;
   }
   if (sub === 'revoke-all') {
-    new SimHarnessOAuth(cfg, SCOPES).revokeAll();
+    new SimcheckOAuth(cfg, SCOPES).revokeAll();
     console.log('revoked every OAuth client, access token and refresh token');
     return;
   }

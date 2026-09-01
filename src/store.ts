@@ -13,7 +13,7 @@ type Listener = (run: Run) => void;
 
 /**
  * Runs live in memory and are written through to
- * `~/.sim-harness/runs/<id>/run.json` so they survive a daemon restart and can
+ * `~/.simcheck/runs/<id>/run.json` so they survive a daemon restart and can
  * be inspected by hand. Artifacts sit alongside in the same directory.
  */
 export class Store {

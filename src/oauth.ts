@@ -23,7 +23,7 @@ interface Persisted {
   clients: OAuthClientInformationFull[];
   /** Refresh tokens, stored hashed. Access tokens stay in memory only. */
   refresh: { hash: string; clientId: string; scopes: string[]; issuedAt: string }[];
-  /** Hashed, short-lived. On disk because `sim-harness pair` runs in a
+  /** Hashed, short-lived. On disk because `simcheck pair` runs in a
    *  different process from the server and both must see it. */
   pairing?: { hash: string; expiresAt: number } | null;
   /** In-flight consent tickets and authorization codes. On disk so that a
@@ -56,9 +56,9 @@ interface AccessToken {
  * The consent step is deliberately not a password. This endpoint is on the
  * public internet, so instead of a credential that can be guessed or phished,
  * authorization requires a short-lived pairing code that is only printed on the
- * Mac itself (`sim-harness pair`). Possession of the machine is the proof.
+ * Mac itself (`simcheck pair`). Possession of the machine is the proof.
  */
-export class SimHarnessOAuth implements OAuthServerProvider {
+export class SimcheckOAuth implements OAuthServerProvider {
   private file: string;
   private data: Persisted = { version: 1, clients: [], refresh: [], pairing: null };
 
@@ -185,7 +185,7 @@ export class SimHarnessOAuth implements OAuthServerProvider {
       return { error: 'This authorization request expired after 10 minutes. Start again from Claude.' };
     }
     if (!this.redeemPairingCode(pairingCode)) {
-      return { error: 'That pairing code is wrong or already used. Run `sim-harness pair` on the Mac for a new one.' };
+      return { error: 'That pairing code is wrong or already used. Run `simcheck pair` on the Mac for a new one.' };
     }
     this.load();
     delete this.codes[`pending:${ticket}`];
@@ -300,7 +300,7 @@ export class SimHarnessOAuth implements OAuthServerProvider {
     return true;
   }
 
-  /** Registered connectors, for `sim-harness remote clients`. */
+  /** Registered connectors, for `simcheck remote clients`. */
   listClients(): { clientId: string; name: string; issuedAt: string | null }[] {
     this.load();
     return this.data.clients.map((c) => ({
@@ -369,7 +369,7 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) =>
 function consentPage(o: { ticket: string; clientName: string; scopes: string[]; state: string; hasCode: boolean }): string {
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connect to sim-harness</title>
+<title>Connect to simcheck</title>
 <style>
 :root{color-scheme:light dark;--bg:#f4f4f5;--card:#fff;--text:#18181b;--muted:#71717a;--border:#e4e4e7;--accent:#2563eb}
 @media(prefers-color-scheme:dark){:root{--bg:#111113;--card:#1c1c1f;--text:#f4f4f5;--muted:#8b8b93;--border:#2a2a2f;--accent:#60a5fa}}
@@ -392,9 +392,9 @@ font-size:.85rem;color:var(--muted);margin-bottom:18px}
 </style></head><body>
 <form class="card" method="POST" action="/oauth/approve">
   <h1>Connect ${esc(o.clientName)}</h1>
-  <p>to sim-harness on your Mac</p>
+  <p>to simcheck on your Mac</p>
   <ul>${o.scopes.map((s) => `<li><code>${esc(s)}</code></li>`).join('')}</ul>
-  <div class="warn">Run <code>sim-harness pair</code> on the Mac and enter the code it prints.
+  <div class="warn">Run <code>simcheck pair</code> on the Mac and enter the code it prints.
   ${o.hasCode ? '' : 'No pairing code is currently active.'}</div>
   <input name="pairing" placeholder="XXXX-XXXX" autocomplete="off"
          autocapitalize="characters" autocorrect="off" spellcheck="false" required autofocus>

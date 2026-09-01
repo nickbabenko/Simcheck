@@ -75,7 +75,7 @@ const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex'
 
 /**
  * Token store. Secrets are kept as hashes; the plaintext of the bootstrap
- * `local` token is also written to ~/.sim-harness/token so the CLI on this
+ * `local` token is also written to ~/.simcheck/token so the CLI on this
  * machine works with no setup.
  */
 export class TokenStore {

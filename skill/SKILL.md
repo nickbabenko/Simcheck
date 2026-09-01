@@ -6,7 +6,7 @@ description: Validate an iOS change on a real simulator and get screenshots back
 # Validating iOS changes on a simulator
 
 You have changed iOS UI code. Before telling anyone it works, run it and look
-at it. `sim-harness` leases a pre-booted simulator, installs your build, drives
+at it. `simcheck` leases a pre-booted simulator, installs your build, drives
 the scenario you describe, and hands back named screenshots.
 
 The point is evidence. "I updated the toggle" is a claim; a screenshot of the
@@ -15,14 +15,14 @@ toggle in its new state is proof, and it is what a reviewer actually wants.
 ## Before you start
 
 ```bash
-sim-harness status
+simcheck status
 ```
 
-If the daemon is down, start it with `sim-harness start`. If `scenarios` reports
+If the daemon is down, start it with `simcheck start`. If `scenarios` reports
 `DISABLED`, only explicit `steps` runs will work.
 
 Tokens are scoped. If a submission is refused with a missing-capability error,
-run `sim-harness whoami` (or the `whoami` MCP tool) rather than guessing: a
+run `simcheck whoami` (or the `whoami` MCP tool) rather than guessing: a
 `remote` token cannot name paths on the host and must reference an uploaded
 build instead.
 
@@ -42,8 +42,8 @@ you can actually look at.
 Without MCP, the CLI does the same:
 
 ```bash
-sim-harness submit request.json --wait
-sim-harness report <run-id>
+simcheck submit request.json --wait
+simcheck report <run-id>
 ```
 
 ## Describing the build
@@ -61,7 +61,7 @@ When you are not on the machine holding the source — or your token lacks
 `runs:submit:local` — build and upload first, then reference the id:
 
 ```bash
-sim-harness upload --scheme App --project App.xcodeproj --label "fix-toggle"
+simcheck upload --scheme App --project App.xcodeproj --label "fix-toggle"
 ```
 
 An `.ipa` will **not** work. Those hold device slices; simulators need a build
@@ -105,7 +105,7 @@ into a repeatable check.
 To author steps by hand, read the live screen first:
 
 ```bash
-sim-harness inspect sim-harness-01     # every element, with ids and coordinates
+simcheck inspect simcheck-01     # every element, with ids and coordinates
 ```
 
 or call `inspect_simulator`.

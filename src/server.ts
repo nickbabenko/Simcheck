@@ -55,7 +55,7 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
   const seg = url.pathname.split('/').filter(Boolean);
   const method = req.method ?? 'GET';
 
-  // Unauthenticated liveness probe, so `sim-harness status` can tell
+  // Unauthenticated liveness probe, so `simcheck status` can tell
   // "daemon down" from "wrong token".
   const remote = remoteAddr(req);
 
@@ -497,7 +497,7 @@ const summarise = (d: Deps, run: Run) => ({
 function bearer(req: http.IncomingMessage): string {
   const header = req.headers.authorization ?? '';
   if (header.startsWith('Bearer ')) return header.slice(7).trim();
-  return String(req.headers['x-sim-harness-token'] ?? '').trim();
+  return String(req.headers['x-simcheck-token'] ?? '').trim();
 }
 
 async function readJson<T>(req: http.IncomingMessage): Promise<T> {

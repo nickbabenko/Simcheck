@@ -31,7 +31,7 @@ export interface WhoAmI {
 
 export class DaemonDownError extends Error {
   constructor(url: string, cause: string) {
-    super(`no sim-harness daemon at ${url} (${cause}). Start one with: sim-harness start`);
+    super(`no simcheck daemon at ${url} (${cause}). Start one with: simcheck start`);
   }
 }
 
@@ -46,7 +46,7 @@ export class Client {
   }
 
   private async call<T>(method: string, route: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
-    if (!this.token) throw new Error('no API token found. Start the daemon once to mint one, or set SIM_HARNESS_TOKEN.');
+    if (!this.token) throw new Error('no API token found. Start the daemon once to mint one, or set SIMCHECK_TOKEN.');
     let res: Response;
     try {
       res = await fetch(this.base + route, {

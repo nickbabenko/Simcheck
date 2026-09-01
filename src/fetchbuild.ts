@@ -90,7 +90,7 @@ export async function fetchBuild(
   // the point is that the caller need not hold the secret at all.
   const configured = cfg.buildCredentials[url.hostname] ?? {};
   const headers: Record<string, string> = {
-    ...(spec.headers ?? {}), ...configured, 'user-agent': 'sim-harness',
+    ...(spec.headers ?? {}), ...configured, 'user-agent': 'simcheck',
   };
   if (Object.keys(configured).length) {
     log.info(`using configured credentials for ${url.hostname}`);
@@ -161,7 +161,7 @@ export async function resolveGithubArtifact(
     throw new HttpError(400,
       'no credentials configured for api.github.com. Two ways forward, and the second needs ' +
       'no credentials at all:\n' +
-      '  1. Add them to buildCredentials in ~/.sim-harness/config.json: ' +
+      '  1. Add them to buildCredentials in ~/.simcheck/config.json: ' +
       '{"api.github.com": {"Authorization": "Bearer <token>"}}\n' +
       '  2. Upload the build directly: call `get_upload_command` for a single-use presigned URL, ' +
       'download the artifact yourself, POST it there, and submit the returned artifactId. ' +
@@ -174,7 +174,7 @@ export async function resolveGithubArtifact(
     : `https://api.github.com/repos/${spec.repo}/actions/artifacts?per_page=100`;
 
   const res = await fetch(base, {
-    headers: { ...auth, accept: 'application/vnd.github+json', 'user-agent': 'sim-harness' },
+    headers: { ...auth, accept: 'application/vnd.github+json', 'user-agent': 'simcheck' },
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {

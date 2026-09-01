@@ -1,5 +1,5 @@
 {
-  "name": "sim-harness",
+  "name": "simcheck",
   "version": "0.1.0",
   "private": true,
   "description": "Hand off iOS simulator testing to a pool of pre-booted sims. Agents submit a build + scenario, poll for completion, and get screenshots back as PR evidence.",
@@ -8,8 +8,8 @@
     "node": ">=20"
   },
   "bin": {
-    "sim-harness": "./dist/cli.js",
-    "sim-harness-mcp": "./dist/mcp.js"
+    "simcheck": "./dist/cli.js",
+    "simcheck-mcp": "./dist/mcp.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js dist/mcp.js dist/mcp-remote.js dist/daemon.js",

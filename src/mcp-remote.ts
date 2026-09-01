@@ -22,15 +22,15 @@ import { randomBytes } from 'node:crypto';
 import { loadConfig, readToken, type Config } from './config.js';
 import { Client } from './client.js';
 import { createMcpServer } from './mcp-server.js';
-import { SimHarnessOAuth, messagePage } from './oauth.js';
+import { SimcheckOAuth, messagePage } from './oauth.js';
 import { logger, logToFile } from './log.js';
 import path from 'node:path';
 
 const log = logger('remote');
 
-export const SCOPES = ['sim-harness:read', 'sim-harness:run'];
+export const SCOPES = ['simcheck:read', 'simcheck:run'];
 
-export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: URL): express.Express {
+export function createRemoteApp(cfg: Config, oauth: SimcheckOAuth, publicUrl: URL): express.Express {
   const app = express();
   app.disable('x-powered-by');
   // cloudflared / tailscale funnel connect over loopback, so exactly one local
@@ -39,7 +39,7 @@ export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: 
   app.set('trust proxy', 'loopback');
 
   // The connector token is separate from the local one: scope it down in
-  // ~/.sim-harness/config.json via remoteToken, or it falls back to the local token.
+  // ~/.simcheck/config.json via remoteToken, or it falls back to the local token.
   const client = new Client(cfg, cfg.remoteToken || undefined);
   const daemonBase = `http://${cfg.host}:${cfg.port}`;
 
@@ -66,7 +66,7 @@ export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: 
     issuerUrl: publicUrl,
     baseUrl: publicUrl,
     scopesSupported: SCOPES,
-    resourceName: 'sim-harness',
+    resourceName: 'simcheck',
     resourceServerUrl: new URL('/mcp', publicUrl),
   }));
 
@@ -93,7 +93,7 @@ export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: 
     resource: new URL(resourcePath, publicUrl).href,
     authorization_servers: [publicUrl.href],
     scopes_supported: SCOPES,
-    resource_name: 'sim-harness',
+    resource_name: 'simcheck',
   });
   app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResource('/mcp')));
   app.get('/.well-known/oauth-protected-resource/sse', (_req, res) => res.json(protectedResource('/sse')));
@@ -221,7 +221,7 @@ export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: 
    * request surface), CI pushes to us. Per-repo setup collapses to one curl,
    * and it works with any CI, not just GitHub.
    *
-   * Authenticated with an ordinary sim-harness token rather than OAuth --
+   * Authenticated with an ordinary simcheck token rather than OAuth --
    * a CI job cannot run a browser consent flow. The token is passed straight
    * through to the daemon, which does the capability check, so there is no
    * second copy of the auth logic here.
@@ -230,7 +230,7 @@ export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: 
     const auth = req.header('authorization');
     if (!auth) {
       return void res.status(401).json({
-        error: 'missing Authorization header -- use a sim-harness token with the artifacts:write capability',
+        error: 'missing Authorization header -- use a simcheck token with the artifacts:write capability',
       });
     }
     await proxyUpload(req, res, auth);
@@ -284,7 +284,7 @@ export function createRemoteApp(cfg: Config, oauth: SimHarnessOAuth, publicUrl: 
 
   app.get('/', (_req, res) => {
     res.type('html').send(messagePage(
-      'sim-harness',
+      'simcheck',
       `Remote MCP endpoint. Add ${new URL('/mcp', publicUrl).href} as a custom connector in Claude `
       + `(or ${new URL('/sse', publicUrl).href} if it expects the older SSE transport).`));
   });
@@ -299,7 +299,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   logToFile(path.join(cfg.home, 'remote.log'));
 
   if (!cfg.publicUrl) {
-    log.error('set publicUrl in ~/.sim-harness/config.json to the https address Claude will reach, e.g. https://sim.example.com');
+    log.error('set publicUrl in ~/.simcheck/config.json to the https address Claude will reach, e.g. https://sim.example.com');
     process.exit(1);
   }
   const publicUrl = new URL(cfg.publicUrl);
@@ -308,7 +308,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(1);
   }
 
-  const oauth = new SimHarnessOAuth(cfg, SCOPES);
+  const oauth = new SimcheckOAuth(cfg, SCOPES);
   const app = createRemoteApp(cfg, oauth, publicUrl);
 
   // Bind loopback: cloudflared connects locally, so the port is never exposed.

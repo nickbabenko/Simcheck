@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>sim-harness — hand off iOS testing to an agent</title>
+<title>simcheck — hand off iOS testing to an agent</title>
 <meta name="description" content="Submit a build, a test scenario and the screenshots you want back. A pool of pre-booted iOS simulators does the rest.">
 <meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#111113" media="(prefers-color-scheme: dark)">
@@ -165,7 +165,7 @@
 
 <main>
 
-<h1>sim-harness</h1>
+<h1>simcheck</h1>
 <p class="lede">
   Hand off iOS testing to a pool of pre-booted simulators. An agent submits a
   build, a test scenario and the screenshots it wants back — and gets evidence,
@@ -176,7 +176,7 @@
 <p>
   An agent that has just changed iOS UI code has no way to know it worked. It can
   read the diff, it can reason about the view hierarchy, and it can still be
-  wrong. sim-harness closes that loop: it runs the build on a real simulator,
+  wrong. simcheck closes that loop: it runs the build on a real simulator,
   drives the flow, and returns named screenshots.
 </p>
 <p>
@@ -236,13 +236,13 @@
   <text x="286" y="73" class="m">queue + scheduler</text>
 
   <rect x="560" y="8" width="150" height="42" rx="9"/>
-  <text x="576" y="27">sim-harness-01</text>
+  <text x="576" y="27">simcheck-01</text>
   <text x="576" y="42" class="m">ready</text>
   <rect x="560" y="58" width="150" height="42" rx="9"/>
-  <text x="576" y="77">sim-harness-02</text>
+  <text x="576" y="77">simcheck-02</text>
   <text x="576" y="92" class="m">leased</text>
   <rect x="560" y="108" width="150" height="42" rx="9"/>
-  <text x="576" y="127">sim-harness-03</text>
+  <text x="576" y="127">simcheck-03</text>
   <text x="576" y="142" class="m">pending</text>
 
   <line x1="150" y1="48" x2="264" y2="48" marker-end="url(#a)"/>
@@ -293,7 +293,7 @@
 </p>
 <div class="note warn">
   <p><span class="lbl">It only touches its own devices.</span> The pool creates,
-  boots, erases and deletes simulators named <code>sim-harness-*</code> and
+  boots, erases and deletes simulators named <code>simcheck-*</code> and
   nothing else. The simulators you use in Xcode are never affected.</p>
 </div>
 <p>
@@ -334,16 +334,16 @@
 
 <h2 id="install">Install</h2>
 <p>Requires macOS, Node 20+, Xcode with an iOS simulator runtime, and Homebrew.</p>
-<pre><code>git clone &lt;repo&gt; ~/Developer/sim-harness
-cd ~/Developer/sim-harness
+<pre><code>git clone &lt;repo&gt; ~/Developer/simcheck
+cd ~/Developer/simcheck
 ./install.sh</code></pre>
 <p>That checks your toolchain, installs the
   <a href="https://github.com/cameroncooke/AXe">AXe</a> simulator driver, builds,
-  links <code>sim-harness</code> into <code>~/.local/bin</code>, registers a
+  links <code>simcheck</code> into <code>~/.local/bin</code>, registers a
   launchd agent so the pool is warm after a reboot, and installs the Claude skill
   and MCP server.</p>
 <p>Then confirm the environment is sane:</p>
-<pre><code>sim-harness doctor</code></pre>
+<pre><code>simcheck doctor</code></pre>
 <div class="note warn">
   <p><span class="lbl">Most common failure:</span> your Xcode SDK is older than
   your installed simulator runtimes. <code>xcodebuild</code> cannot target a
@@ -354,12 +354,12 @@ cd ~/Developer/sim-harness
 
 <h2 id="agents">Connect an agent</h2>
 <p>
-  sim-harness speaks <a href="https://modelcontextprotocol.io">MCP</a> over stdio,
+  simcheck speaks <a href="https://modelcontextprotocol.io">MCP</a> over stdio,
   so any MCP-capable agent can drive it. To get the exact config for your machine,
   with real paths already filled in:
 </p>
-<pre><code>sim-harness mcp-config          # all of them
-sim-harness mcp-config codex    # just one</code></pre>
+<pre><code>simcheck mcp-config          # all of them
+simcheck mcp-config codex    # just one</code></pre>
 
 <div class="tabs" role="tablist">
   <button role="tab" aria-selected="true" aria-controls="t-cc">Claude Code</button>
@@ -372,7 +372,7 @@ sim-harness mcp-config codex    # just one</code></pre>
 
 <div class="panel" id="t-cc" role="tabpanel">
   <p>One command, applied to every session:</p>
-  <pre><code>claude mcp add sim-harness --scope user -- /opt/homebrew/bin/node ~/Developer/sim-harness/dist/mcp.js</code></pre>
+  <pre><code>claude mcp add simcheck --scope user -- /opt/homebrew/bin/node ~/Developer/simcheck/dist/mcp.js</code></pre>
   <p>Verify with <code>claude mcp list</code>. The installer also drops an
     <code>ios-sim-test</code> skill into <code>~/.claude/skills/</code>, which
     teaches Claude when to reach for the harness and how to write a good scenario.</p>
@@ -382,9 +382,9 @@ sim-harness mcp-config codex    # just one</code></pre>
   <p>Edit <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>:</p>
   <pre><code>{
   "mcpServers": {
-    "sim-harness": {
+    "simcheck": {
       "command": "/opt/homebrew/bin/node",
-      "args": ["/Users/you/Developer/sim-harness/dist/mcp.js"]
+      "args": ["/Users/you/Developer/simcheck/dist/mcp.js"]
     }
   }
 }</code></pre>
@@ -393,20 +393,20 @@ sim-harness mcp-config codex    # just one</code></pre>
 
 <div class="panel" id="t-cx" role="tabpanel" hidden>
   <p>Add to <code>~/.codex/config.toml</code>:</p>
-  <pre><code>[mcp_servers.sim-harness]
+  <pre><code>[mcp_servers.simcheck]
 command = "/opt/homebrew/bin/node"
-args = ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
+args = ["/Users/you/Developer/simcheck/dist/mcp.js"]</code></pre>
   <p>Or let the CLI do it:</p>
-  <pre><code>codex mcp add sim-harness -- /opt/homebrew/bin/node ~/Developer/sim-harness/dist/mcp.js</code></pre>
+  <pre><code>codex mcp add simcheck -- /opt/homebrew/bin/node ~/Developer/simcheck/dist/mcp.js</code></pre>
 </div>
 
 <div class="panel" id="t-cu" role="tabpanel" hidden>
   <p><code>~/.cursor/mcp.json</code> for every project, or <code>.cursor/mcp.json</code> for one:</p>
   <pre><code>{
   "mcpServers": {
-    "sim-harness": {
+    "simcheck": {
       "command": "/opt/homebrew/bin/node",
-      "args": ["/Users/you/Developer/sim-harness/dist/mcp.js"]
+      "args": ["/Users/you/Developer/simcheck/dist/mcp.js"]
     }
   }
 }</code></pre>
@@ -416,9 +416,9 @@ args = ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
   <p><code>.vscode/mcp.json</code> in the workspace:</p>
   <pre><code>{
   "servers": {
-    "sim-harness": {
+    "simcheck": {
       "command": "/opt/homebrew/bin/node",
-      "args": ["/Users/you/Developer/sim-harness/dist/mcp.js"]
+      "args": ["/Users/you/Developer/simcheck/dist/mcp.js"]
     }
   }
 }</code></pre>
@@ -433,11 +433,11 @@ args = ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
     Zed, Gemini CLI, opencode, your own. Point it at:
   </p>
   <pre><code>command: /opt/homebrew/bin/node
-args:    ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
+args:    ["/Users/you/Developer/simcheck/dist/mcp.js"]</code></pre>
   <p>Most clients use the same JSON shape as Claude Desktop. If yours has no MCP
     support at all, drive the HTTP API directly — see
     <a href="#reference">Reference</a> — or shell out to the
-    <code>sim-harness</code> CLI, which is equally scriptable.</p>
+    <code>simcheck</code> CLI, which is equally scriptable.</p>
 </div>
 
 <h3>The tools your agent gets</h3>
@@ -456,11 +456,11 @@ args:    ["/Users/you/Developer/sim-harness/dist/mcp.js"]</code></pre>
 
 <h2 id="first">First run</h2>
 <p>No build needed — this drives the simulator's own Settings app:</p>
-<pre><code>sim-harness submit examples/settings-steps.json --wait</code></pre>
+<pre><code>simcheck submit examples/settings-steps.json --wait</code></pre>
 <p>Or ask your agent, in plain English:</p>
 <pre><code>Run the login flow on a simulator and show me a screenshot of the
 settings screen with dark mode on.</code></pre>
-<p>Everything a run produces lands in <code>~/.sim-harness/runs/&lt;id&gt;/</code>:</p>
+<p>Everything a run produces lands in <code>~/.simcheck/runs/&lt;id&gt;/</code>:</p>
 <pre><code>report.md          the evidence write-up
 screenshots/*.png  every named capture, plus final-state
 run.json           full state, including executedSteps and the trace
@@ -489,12 +489,12 @@ build.log          xcodebuild output, when built from source</code></pre>
   <tr><td><code>remote</code></td><td><span class="pill no">no</span></td><td>Anything off-machine — uploads a built <code>.app</code> instead</td></tr>
   <tr><td><code>readonly</code></td><td><span class="pill no">no</span></td><td>Polling and reading results only</td></tr>
 </table>
-<pre><code>sim-harness whoami                              # what this token may do
-sim-harness token create cloud --preset remote  # secret printed once
-sim-harness token revoke cloud</code></pre>
+<pre><code>simcheck whoami                              # what this token may do
+simcheck token create cloud --preset remote  # secret printed once
+simcheck token revoke cloud</code></pre>
 <p>
   Every submission, upload and refusal is appended to
-  <code>~/.sim-harness/audit.log</code>, tagged with the token that did it.
+  <code>~/.simcheck/audit.log</code>, tagged with the token that did it.
 </p>
 
 <h3>Reaching it from elsewhere</h3>
@@ -504,7 +504,7 @@ sim-harness token revoke cloud</code></pre>
   <tr><td><code>cloudflare-access</code></td><td>A client that can't run a VPN — a cloud agent sandbox. The daemon verifies the <code>Cf-Access-Jwt-Assertion</code> JWT itself.</td></tr>
   <tr><td><code>trusted-proxy</code></td><td>A ZTNA broker or internal reverse proxy — a Netskope Private Access publisher, an internal load balancer.</td></tr>
 </table>
-<pre><code>sim-harness tunnel sim.example.com</code></pre>
+<pre><code>simcheck tunnel sim.example.com</code></pre>
 <p>
   That scaffolds a Cloudflare Tunnel and prints the remaining steps — and
   deliberately creates nothing in your Cloudflare account.
@@ -533,7 +533,7 @@ sim-harness token revoke cloud</code></pre>
   </div>
   <div class="card">
     <h3>Build here, test there</h3>
-    <p><code>sim-harness upload --scheme App --project App.xcodeproj</code> builds,
+    <p><code>simcheck upload --scheme App --project App.xcodeproj</code> builds,
       zips and uploads; the far side references the artifact id. Only the compiled
       bundle moves, never the source.</p>
   </div>
@@ -546,17 +546,17 @@ sim-harness token revoke cloud</code></pre>
 
 <h2 id="reference">Reference</h2>
 <h3>CLI</h3>
-<pre><code>sim-harness status                    daemon and pool state
-sim-harness doctor                    toolchain, TLS path, exposure
-sim-harness submit &lt;file.json&gt; --wait queue a run and follow it
-sim-harness watch &lt;run-id&gt;            follow a run
-sim-harness report &lt;run-id&gt;           markdown evidence
-sim-harness inspect &lt;device&gt;          live accessibility tree
-sim-harness upload &lt;App.app&gt;          upload a build, prints an artifact id
-sim-harness pool add -n 2             add simulators
-sim-harness token list|create|revoke  manage access
-sim-harness mcp-config [agent]        MCP setup for your agent
-sim-harness tunnel &lt;hostname&gt;         scaffold Cloudflare Tunnel + Access</code></pre>
+<pre><code>simcheck status                    daemon and pool state
+simcheck doctor                    toolchain, TLS path, exposure
+simcheck submit &lt;file.json&gt; --wait queue a run and follow it
+simcheck watch &lt;run-id&gt;            follow a run
+simcheck report &lt;run-id&gt;           markdown evidence
+simcheck inspect &lt;device&gt;          live accessibility tree
+simcheck upload &lt;App.app&gt;          upload a build, prints an artifact id
+simcheck pool add -n 2             add simulators
+simcheck token list|create|revoke  manage access
+simcheck mcp-config [agent]        MCP setup for your agent
+simcheck tunnel &lt;hostname&gt;         scaffold Cloudflare Tunnel + Access</code></pre>
 
 <h3>HTTP API</h3>
 <p>Bearer token on every route except <code>/health</code>; each checks a capability.</p>
@@ -589,7 +589,7 @@ GET    /health                           liveness</code></pre>
 </div>
 
 <footer>
-  sim-harness · <code>~/Developer/sim-harness</code> · see <code>README.md</code>
+  simcheck · <code>~/Developer/simcheck</code> · see <code>README.md</code>
   for full configuration, and <code>config.example.json</code> for every setting.
 </footer>
 

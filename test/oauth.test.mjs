@@ -1,6 +1,6 @@
 /**
  * End-to-end test of the remote MCP OAuth flow, including the attacks it must
- * refuse. Spawns its own server against a throwaway SIM_HARNESS_HOME.
+ * refuse. Spawns its own server against a throwaway SIMCHECK_HOME.
  *
  * Run with: npm test
  */
@@ -16,7 +16,7 @@ const PORT = 8000 + (process.pid % 1000);
 const BASE = `http://localhost:${PORT}`;
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-oauth-'));
 const REDIRECT = 'http://localhost:9999/cb';
-const env = { ...process.env, SIM_HARNESS_HOME: HOME, SIM_HARNESS_PUBLIC_URL: BASE, SIM_HARNESS_REMOTE_PORT: String(PORT) };
+const env = { ...process.env, SIMCHECK_HOME: HOME, SIMCHECK_PUBLIC_URL: BASE, SIMCHECK_REMOTE_PORT: String(PORT) };
 
 let server;
 
@@ -221,7 +221,7 @@ test('MCP endpoint serves tools to an authorised caller', async () => {
     const line = text.split('\n').find((l) => l.startsWith('data:')) ?? text;
     return JSON.parse(line.replace(/^data:\s*/, ''));
   };
-  assert.equal((await parse(init)).result.serverInfo.name, 'sim-harness');
+  assert.equal((await parse(init)).result.serverInfo.name, 'simcheck');
 
   const tools = await parse(await mcp({ method: 'tools/list', params: {} }, auth));
   assert.ok(tools.result.tools.length >= 10, `expected the full tool set, saw ${tools.result.tools.length}`);

@@ -1,4 +1,4 @@
-# Build an iOS app for the simulator in CI, then have sim-harness test it.
+# Build an iOS app for the simulator in CI, then have simcheck test it.
 #
 # The harness downloads the artifact itself: an MCP tool call carries JSON, so a
 # 40MB binary cannot go through one. That is what `app.url` is for.
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # A SIMULATOR build. An .ipa is an arm64 device slice and will not run
-      # on a simulator -- sim-harness rejects those explicitly.
+      # on a simulator -- simcheck rejects those explicitly.
       - name: Build for the simulator
         run: |
           xcodebuild \
@@ -35,15 +35,15 @@ jobs:
 
       # Push straight to the harness. One step, no GitHub token on the Mac,
       # and it prints the artifact id to test with.
-      - name: Push to sim-harness
+      - name: Push to simcheck
         run: |
-          curl -sS -X POST "$SIM_HARNESS_URL/upload?label=$GITHUB_REF_NAME&gitSha=$GITHUB_SHA" \
-            -H "Authorization: Bearer $SIM_HARNESS_TOKEN" \
+          curl -sS -X POST "$SIMCHECK_URL/upload?label=$GITHUB_REF_NAME&gitSha=$GITHUB_SHA" \
+            -H "Authorization: Bearer $SIMCHECK_TOKEN" \
             -H "Content-Type: application/zip" \
             --data-binary @App.zip
         env:
-          SIM_HARNESS_URL: ${{ secrets.SIM_HARNESS_URL }}
-          SIM_HARNESS_TOKEN: ${{ secrets.SIM_HARNESS_TOKEN }}
+          SIMCHECK_URL: ${{ secrets.SIMCHECK_URL }}
+          SIMCHECK_TOKEN: ${{ secrets.SIMCHECK_TOKEN }}
 
       # Alternative: keep it as a GitHub artifact and let the harness pull it
       # later with app.github. Needs a GitHub token stored on the harness.

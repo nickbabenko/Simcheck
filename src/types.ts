@@ -205,7 +205,7 @@ export interface Run {
 
 export interface PooledDevice {
   udid: string;
-  name: string;         // simulator name, e.g. "sim-harness-01"
+  name: string;         // simulator name, e.g. "simcheck-01"
   deviceType: string;   // e.g. "iPhone 17 Pro"
   runtime: string;      // e.g. "iOS 27.0"
   status: DeviceStatus;

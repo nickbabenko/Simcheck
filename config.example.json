@@ -1,5 +1,5 @@
 {
-  "//": "Copy to ~/.sim-harness/config.json and delete what you do not need.",
+  "//": "Copy to ~/.simcheck/config.json and delete what you do not need.",
   "//_": "Every key is optional; omitted keys use the built-in default shown here.",
 
   "poolSize": 3,
@@ -13,7 +13,7 @@
   "edgeAuth": "none",
   "edgeAllowLoopback": true,
 
-  "//_cloudflare": "edgeAuth: 'cloudflare-access' -- run `sim-harness tunnel <host>` for the setup steps.",
+  "//_cloudflare": "edgeAuth: 'cloudflare-access' -- run `simcheck tunnel <host>` for the setup steps.",
   "cloudflareTeamDomain": "",
   "cloudflareAud": [],
 
@@ -30,7 +30,7 @@
   "//_remote": "Remote MCP, for Claude connectors including the phone app. Claude's cloud dials this, so it must be publicly reachable -- Tailscale will not work.",
   "publicUrl": "",
   "remotePort": 8830,
-  "//_remoteToken": "Token the remote MCP server uses against the daemon. Scope it down: `sim-harness token create phone --preset remote`.",
+  "//_remoteToken": "Token the remote MCP server uses against the daemon. Scope it down: `simcheck token create phone --preset remote`.",
   "remoteToken": "",
 
   "defaultTimeoutMs": 600000,
