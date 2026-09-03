@@ -1,6 +1,7 @@
 # simcheck
 
-Hand off iOS testing to a pool of pre-booted simulators.
+Hand off mobile UI testing to a pool of pre-booted iOS simulators and Android
+emulators.
 
 **[Documentation](https://nickbabenko.github.io/Simcheck/)** — features, how it
 works, and setup for Claude Code, Claude Desktop, Codex, Cursor, VS Code and any
@@ -8,21 +9,24 @@ other MCP agent. Also available offline: `simcheck docs` opens the same page
 from your checkout, no network needed.
 
 An agent submits a build, a test scenario and the screenshots it wants back.
-The harness leases a warm simulator, installs the app, drives the UI, captures
+The harness leases a warm device, installs the app, drives the UI, captures
 the named screenshots and returns a verdict. The caller polls until it is done,
 then attaches the evidence to a PR.
+
+The platform is inferred from the build — an `.apk` means Android, a `.app`
+means iOS — so most requests never mention it. One pool holds both.
 
 The point is to replace "I changed the toggle and it should work" with a
 screenshot of the toggle in its new state.
 
 ```
-     agent                    daemon                     simulator pool
+     agent                    daemon                      device pool
        |                        |                              |
-       |-- run_ios_test ------->| queue: pending               |  01 ready
-       |<-- runId --------------| lease a ready sim ---------->|  02 ready
-       |                        | build -> install -> drive    |  03 leased
+       |-- run_device_test ---->| queue: pending               |  01 ios   ready
+       |<-- runId --------------| lease a ready device ------->|  02 ios   ready
+       |                        | build -> install -> drive    |  03 droid leased
        |-- wait_for_test_run -->|                              |
-       |<-- passed + shots -----| recycle the sim ------------>|  03 ready
+       |<-- passed + shots -----| recycle the device --------->|  03 droid ready
 ```
 
 ## Install
@@ -43,8 +47,21 @@ registers a launchd agent so the pool is warm after a reboot, installs the
 ./install.sh --uninstall     # remove agent, MCP entry, skill and symlinks
 ```
 
-Requirements: macOS, Node 20+, Xcode with an iOS simulator runtime installed,
-and Homebrew (only to install AXe).
+Requirements: macOS, Node 20+, and Homebrew.
+
+For iOS: Xcode with a simulator runtime installed, plus AXe (the installer adds
+it). For Android: the SDK, a JDK, an emulator and a system image —
+
+```bash
+brew install --cask android-commandlinetools android-platform-tools
+brew install openjdk@21
+sdkmanager "emulator" "build-tools;35.0.0" \
+           "system-images;android-35;google_apis;arm64-v8a"
+```
+
+Neither platform is required. A Mac with Xcode and no Android SDK runs iOS and
+reports android as unavailable with a reason; the reverse also holds. Run
+`simcheck doctor` to see exactly what is missing and the command that fixes it.
 
 ## Use it
 
@@ -689,15 +706,27 @@ build.log                xcodebuild output, when built from source
 | `src/runner.ts` | One run: build, install, drive, report, release |
 | `src/agent.ts` | The natural-language scenario loop |
 | `src/steps.ts` | Executes one action; records it for replay |
-| `src/axe.ts` | AXe wrapper, and the tree compression that makes it promptable |
-| `src/build.ts` | xcodebuild, zip unpacking, device-build detection |
+| `src/device.ts` | The platform seam: device backend, UI driver, multi-touch |
+| `src/screen.ts` | The normalised screen model both drivers produce |
+| `src/platforms.ts` | Which platforms this daemon can actually serve |
+| `src/ios/axe.ts` | AXe wrapper, and the tree compression that makes it promptable |
+| `src/ios/build.ts` | xcodebuild, zip unpacking, device-build detection |
 | `src/llm.ts` | Anthropic API and `claude` CLI backends |
 | `src/server.ts` | HTTP API |
 | `src/auth.ts` | Scoped capability tokens |
-| `src/artifacts.ts` | Content-addressed store of uploaded `.app` bundles |
+| `src/artifacts.ts` | Content-addressed store of uploaded `.app` bundles and `.apk`s |
 | `src/fetchbuild.ts` | Downloads a build from a URL, with SSRF guards |
-| `src/xctest.ts` | Runs an XCUITest bundle and parses the .xcresult |
-| `src/baguette.ts` | Multi-touch driver (pinch, pan, double-tap) |
+| `src/ios/xctest.ts` | Runs an XCUITest bundle and parses the .xcresult |
+| `src/ios/baguette.ts` | iOS multi-touch driver (pinch, pan, double-tap) |
+| `src/android/sdk.ts` | Finds the Android SDK, and a JDK to run its Java tools |
+| `src/android/adb.ts` | adb transport, keyed by AVD name rather than serial |
+| `src/android/avd.ts` | System images, AVD creation, emulator boot and kill |
+| `src/android/uiautomator.ts` | `uiautomator dump` + `input`, flattened to the shared model |
+| `src/android/apk.ts` | Manifest reading and the ABI compatibility check |
+| `src/android/gradle.ts` | Assembles app and androidTest APKs |
+| `src/android/instrument.ts` | Runs an instrumentation suite and parses its stream |
+| `src/android/touch.ts` | Android multi-touch, via the driver APK |
+| `driver/` | The UiAutomator multi-touch driver APK (built by `driver/build.sh`) |
 | `src/audit.ts` | Append-only JSONL audit log |
 | `src/edge.ts` | Cloudflare Access JWT verification, trusted-proxy gating |
 | `src/doctor.ts` | Toolchain, TLS-interception and exposure diagnosis |

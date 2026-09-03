@@ -31,12 +31,19 @@ export async function prepareApp(
     const serial = await adb.serialForOrNull(avd);
     if (serial) assertRunnableAbi(info, await deviceAbis(adb, serial), path.basename(apkPath));
 
-    if (!info.launchActivity) {
+    // A test APK really has nothing to launch, and saying so here is far
+    // clearer than an install that succeeds and then starts nothing.
+    if (!info.launchActivity && info.instrumentationRunner) {
       throw new Error(
-        `${path.basename(apkPath)} declares no launchable activity, so there is nothing to start. ` +
-        `${info.instrumentationRunner
-          ? 'It looks like an androidTest APK -- pass it as `instrumentation.testApk` instead.'
-          : 'Is this an app APK?'}`);
+        `${path.basename(apkPath)} declares an instrumentation runner and no launchable activity, ` +
+        'so it is an androidTest APK -- pass it as `instrumentation.testApk` instead.');
+    }
+    // No activity is not fatal: `aapt2 dump badging` does not report a
+    // launcher entry declared through an <activity-alias>, which plenty of
+    // real apps use. The backend resolves it from the device after install,
+    // where PackageManager gives the authoritative answer.
+    if (!info.launchActivity) {
+      log.info(`${path.basename(apkPath)} has no launchable-activity in its manifest; will resolve it on the device after install`);
     }
     return {
       appPath: apkPath,
@@ -44,7 +51,7 @@ export async function prepareApp(
       // Android's log stream is filtered by process name, which is the
       // package unless the manifest overrides it.
       executable: spec.bundleId || info.packageName,
-      activity: info.launchActivity,
+      ...(info.launchActivity ? { activity: info.launchActivity } : {}),
       preinstalled: false,
       ...(buildLog ? { buildLog } : {}),
     };

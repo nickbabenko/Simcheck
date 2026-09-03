@@ -181,18 +181,26 @@ class AndroidDevices implements DeviceBackend {
         'Use launchEnv, which becomes string intent extras.');
     }
 
+    // A launcher entry declared as an <activity-alias> never reaches the APK
+    // manifest dump, so the device is asked instead -- PackageManager knows.
+    let activity = app.activity;
+    if (!activity) {
+      activity = await this.resolveLauncherActivity(serial, app.appId);
+      if (activity) log.info(`resolved ${app.appId} launcher activity on the device: ${activity}`);
+    }
+
     let command: string;
-    if (app.activity) {
+    if (activity) {
       const extras = Object.entries(env)
         .map(([k, v]) => `--es ${shellQuote(k)} ${shellQuote(v)}`).join(' ');
       // -W waits for the launch to complete, so a screenshot straight after
       // is of the app rather than of whatever was on screen before it.
-      command = `am start -W -n ${shellQuote(`${app.appId}/${app.activity}`)} ${extras}`.trim();
+      command = `am start -W -n ${shellQuote(`${app.appId}/${activity}`)} ${extras}`.trim();
     } else {
       if (Object.keys(env).length) {
         throw new Error(
-          `cannot pass launchEnv to ${app.appId}: its launchable activity is unknown, so the ` +
-          'harness must start it with monkey, which cannot carry extras. Set app.bundleId and ensure the APK declares a launcher activity.');
+          `cannot pass launchEnv to ${app.appId}: its launchable activity could not be resolved, so ` +
+          'the harness must start it with monkey, which cannot carry extras. Name the activity in the APK manifest, or drop launchEnv.');
       }
       command = `monkey -p ${shellQuote(app.appId)} -c android.intent.category.LAUNCHER 1`;
     }
@@ -203,6 +211,24 @@ class AndroidDevices implements DeviceBackend {
     }
     const pid = await this.adb.shellTry(serial, `pidof -s ${shellQuote(app.appId)}`, { timeoutMs: 30_000 });
     return Number(pid.out.trim()) || 0;
+  }
+
+  /**
+   * Ask PackageManager which activity a launcher tap would start.
+   *
+   * The authoritative answer, and the only one that accounts for an
+   * <activity-alias>. Returns undefined rather than throwing: monkey's
+   * launcher intent is a perfectly good fallback.
+   */
+  private async resolveLauncherActivity(serial: string, pkg: string): Promise<string | undefined> {
+    const r = await this.adb.shellTry(serial,
+      `cmd package resolve-activity --brief ${shellQuote(pkg)}`, { timeoutMs: 30_000 });
+    // The brief form prints "com.example/.MainActivity" on its last line.
+    const line = r.out.split('\n').map((l) => l.trim()).filter(Boolean).pop();
+    if (!line || !line.includes('/')) return undefined;
+    const [owner, activity] = line.split('/');
+    if (owner !== pkg || !activity) return undefined;
+    return activity.startsWith('.') ? `${pkg}${activity}` : activity;
   }
 
   async terminate(id: string, appId: string): Promise<void> {

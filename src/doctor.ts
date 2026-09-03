@@ -3,6 +3,9 @@ import tls from 'node:tls';
 import { spawnSync } from 'node:child_process';
 import type { Config } from './config.js';
 import { baseUrl } from './config.js';
+import { isToolsError, resolveTools } from './android/sdk.js';
+import { listSystemImages, preferredAbi } from './android/avd.js';
+import { resolveDriverApks } from './android/touch.js';
 
 export interface Check {
   name: string;
@@ -20,6 +23,15 @@ const INSPECTORS = /netskope|zscaler|bluecoat|blue coat|forcepoint|palo alto|mca
  * is an inspecting proxy rather than anything wrong with the code.
  */
 export async function diagnose(cfg: Config): Promise<Check[]> {
+  const checks: Check[] = [];
+  if (cfg.platforms.includes('ios')) checks.push(...iosChecks(cfg));
+  if (cfg.platforms.includes('android')) checks.push(...androidChecks(cfg));
+  checks.push(...await networkChecks(cfg));
+  return checks;
+}
+
+/** Everything an iOS run depends on before it reaches the network. */
+function iosChecks(cfg: Config): Check[] {
   const checks: Check[] = [];
 
   /* -------------------------------------------------------------- toolchain */
@@ -51,6 +63,97 @@ export async function diagnose(cfg: Config): Promise<Check[]> {
   checks.push(axe
     ? { name: 'AXe', state: 'ok', detail: axe }
     : { name: 'AXe', state: 'fail', detail: 'not on PATH', fix: 'brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe' });
+
+  const baguette = run(cfg.baguetteBin, ['--version']).trim();
+  checks.push(baguette
+    ? { name: 'iOS multi-touch', state: 'ok', detail: `baguette ${baguette}` }
+    : {
+        name: 'iOS multi-touch', state: 'warn',
+        detail: 'no baguette on PATH -- pinch, pan and double_tap will fail on iOS',
+        fix: 'brew install baguette',
+      });
+
+  return checks;
+}
+
+/**
+ * Everything an Android run depends on.
+ *
+ * Ordered so the first failure is the one worth fixing: without an SDK
+ * nothing else can be judged, and without a JDK every Java tool in it reports
+ * a confusing "Unable to locate a Java Runtime" rather than its real problem.
+ */
+function androidChecks(cfg: Config): Check[] {
+  const checks: Check[] = [];
+  const tools = resolveTools(cfg);
+
+  if (isToolsError(tools)) {
+    checks.push({
+      name: 'Android SDK', state: 'fail', detail: tools.error,
+      fix: 'brew install --cask android-commandlinetools',
+    });
+    return checks;
+  }
+  checks.push({ name: 'Android SDK', state: 'ok', detail: tools.sdkRoot });
+
+  checks.push(tools.javaHome
+    ? { name: 'JDK', state: 'ok', detail: tools.javaHome }
+    : {
+        name: 'JDK', state: 'fail',
+        detail: 'no JDK found -- avdmanager, sdkmanager, apkanalyzer and Gradle all need one',
+        fix: 'brew install openjdk@21  (Homebrew JDKs are keg-only, so this resolves them by path rather than via /usr/bin/java)',
+      });
+
+  const adb = run(tools.adb, ['--version']).split('\n')[0]?.trim();
+  checks.push(adb
+    ? { name: 'adb', state: 'ok', detail: adb }
+    : { name: 'adb', state: 'fail', detail: `not usable at ${tools.adb}`, fix: 'brew install --cask android-platform-tools' });
+
+  const abi = preferredAbi();
+  checks.push(fs.existsSync(tools.emulator)
+    ? { name: 'Emulator', state: 'ok', detail: tools.emulator }
+    : { name: 'Emulator', state: 'fail', detail: 'no emulator binary in the SDK', fix: 'sdkmanager "emulator"' });
+
+  const images = listSystemImages(tools.sdkRoot);
+  const native = images.filter((i) => i.abi === abi);
+  if (!images.length) {
+    checks.push({
+      name: 'System image', state: 'fail', detail: 'none installed',
+      fix: `sdkmanager "system-images;android-35;google_apis;${abi}"`,
+    });
+  } else if (!native.length) {
+    checks.push({
+      name: 'System image', state: 'warn',
+      detail: `${images.length} installed, but none for ${abi} -- an emulator would run under emulation and be far too slow`,
+      fix: `sdkmanager "system-images;android-35;google_apis;${abi}"`,
+    });
+  } else {
+    checks.push({
+      name: 'System image', state: 'ok',
+      detail: `${native.map((i) => `API ${i.api}`).join(', ')} (${abi})`,
+    });
+  }
+
+  checks.push(tools.aapt2
+    ? { name: 'aapt2', state: 'ok', detail: tools.aapt2 }
+    : tools.apkanalyzer
+      ? { name: 'aapt2', state: 'warn', detail: 'not installed; falling back to apkanalyzer, which is slower', fix: 'sdkmanager "build-tools;35.0.0"' }
+      : { name: 'aapt2', state: 'fail', detail: 'no way to read an APK manifest', fix: 'sdkmanager "build-tools;35.0.0"' });
+
+  const driver = resolveDriverApks(cfg);
+  checks.push(driver
+    ? { name: 'Android multi-touch', state: 'ok', detail: driver.test }
+    : {
+        name: 'Android multi-touch', state: 'warn',
+        detail: 'driver APK not built -- pinch, pan and double_tap will fail on Android',
+        fix: './driver/build.sh  (needs a JDK and Gradle)',
+      });
+
+  return checks;
+}
+
+async function networkChecks(cfg: Config): Promise<Check[]> {
+  const checks: Check[] = [];
 
   /* -------------------------------------------------------------------- TLS */
   const caPath = cfg.caBundle || process.env['NODE_EXTRA_CA_CERTS'] || '';

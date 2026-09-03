@@ -15,7 +15,9 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 REMOTE_LABEL="com.nickbabenko.simcheck-remote"
 REMOTE_PLIST="$HOME/Library/LaunchAgents/$REMOTE_LABEL.plist"
 BINDIR="$HOME/.local/bin"
-SKILLDIR="$HOME/.claude/skills/ios-sim-test"
+SKILLDIR="$HOME/.claude/skills/device-test"
+# Superseded by device-test, which covers Android too.
+OLD_SKILLDIR="$HOME/.claude/skills/ios-sim-test"
 HARNESS_HOME="${SIMCHECK_HOME:-$HOME/.simcheck}"
 
 WANT_DAEMON=1; WANT_MCP=1; UNINSTALL=0
@@ -42,6 +44,7 @@ if [ "$UNINSTALL" = 1 ]; then
   launchctl bootout "gui/$(id -u)/$REMOTE_LABEL" 2>/dev/null || true
   rm -f "$REMOTE_PLIST" && ok "remote MCP agent removed"
   command -v tailscale >/dev/null && { tailscale funnel --https=8443 off >/dev/null 2>&1 || true; ok "tailscale funnel on 8443 disabled"; }
+  rm -rf "$OLD_SKILLDIR"
   rm -f "$BINDIR/simcheck" "$BINDIR/simcheck-mcp" && ok "symlinks removed"
   rm -rf "$SKILLDIR" && ok "skill removed"
   command -v claude >/dev/null && { claude mcp remove simcheck --scope user >/dev/null 2>&1 || true; ok "MCP entry removed"; }
@@ -81,6 +84,54 @@ fi
 command -v axe >/dev/null || die "AXe install did not complete."
 ok "axe $(axe --version 2>/dev/null | head -1)"
 
+# ---------------------------------------------------------------- android --
+# Entirely optional. A Mac with Xcode and no Android SDK is a perfectly good
+# simcheck install -- it simply reports android as unavailable and refuses
+# those runs with a reason. So nothing here is fatal.
+say "Checking Android support (optional)"
+
+ANDROID_SDK=""
+for candidate in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" /opt/homebrew/share/android-commandlinetools /usr/local/share/android-commandlinetools; do
+  if [ -n "$candidate" ] && [ -d "$candidate" ]; then ANDROID_SDK="$candidate"; break; fi
+done
+
+# Homebrew's openjdk formulae are keg-only and never register with the
+# /usr/bin/java stub, so a machine can hold three JDKs and still fail every
+# Android tool with "Unable to locate a Java Runtime". Resolve one by path.
+JDK_HOME="${JAVA_HOME:-}"
+if [ -z "$JDK_HOME" ]; then
+  for candidate in /opt/homebrew/opt/openjdk@21 /opt/homebrew/opt/openjdk@17 "$(/usr/libexec/java_home -v 17+ 2>/dev/null || true)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate/bin/java" ]; then JDK_HOME="$candidate"; break; fi
+  done
+fi
+
+if [ -z "$ANDROID_SDK" ]; then
+  warn "no Android SDK found; android runs will be refused"
+  warn "  to add it: brew install --cask android-commandlinetools android-platform-tools"
+else
+  ok "Android SDK at $ANDROID_SDK"
+  [ -n "$JDK_HOME" ] && ok "JDK at $JDK_HOME" || warn "no JDK found; avdmanager and Gradle need one (brew install openjdk@21)"
+  [ -x "$ANDROID_SDK/emulator/emulator" ] || warn "no emulator binary; add it with: sdkmanager \"emulator\""
+  if ! ls -d "$ANDROID_SDK"/system-images/*/*/* >/dev/null 2>&1; then
+    ABI=arm64-v8a; [ "$(uname -m)" = "x86_64" ] && ABI=x86_64
+    warn "no system image; add one with: sdkmanager \"system-images;android-35;google_apis;$ABI\""
+  fi
+  # The multi-touch driver is a build artefact, not a checked-in binary: adb
+  # drives one pointer, so without it pinch and two-finger pan cannot happen.
+  if [ -n "$JDK_HOME" ] && ls "$REPO"/driver/build/outputs/apk/androidTest/debug/*.apk >/dev/null 2>&1; then
+    ok "multi-touch driver already built"
+  elif [ -n "$JDK_HOME" ] && { [ -x "$REPO/driver/gradlew" ] || command -v gradle >/dev/null; }; then
+    say "Building the Android multi-touch driver"
+    if (cd "$REPO/driver" && JAVA_HOME="$JDK_HOME" ./build.sh >/tmp/simcheck-driver-build.log 2>&1); then
+      ok "multi-touch driver built"
+    else
+      warn "driver build failed (see /tmp/simcheck-driver-build.log); pinch/pan/double_tap will be unavailable on Android"
+    fi
+  else
+    warn "skipping the multi-touch driver: needs a JDK and Gradle (brew install gradle), then ./driver/build.sh"
+  fi
+fi
+
 # ------------------------------------------------------------------- build --
 say "Building"
 cd "$REPO"
@@ -119,6 +170,10 @@ if [ "$WANT_DAEMON" = 1 ]; then
   mkdir -p "$(dirname "$PLIST")" "$HARNESS_HOME"
   # KeepAlive so the daemon comes back if it crashes; RunAtLoad so a warm pool
   # is waiting after a reboot. PATH must include Homebrew for axe.
+  #
+  # launchd's environment is not a login shell: ANDROID_HOME and JAVA_HOME that
+  # exist in Terminal are simply absent here, which is why they are baked in
+  # rather than assumed.
   cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -139,7 +194,10 @@ if [ "$WANT_DAEMON" = 1 ]; then
   <dict>
     <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>$HOME</string>
-    <key>SIMCHECK_HOME</key><string>$HARNESS_HOME</string>${CA_BUNDLE:+
+    <key>SIMCHECK_HOME</key><string>$HARNESS_HOME</string>${ANDROID_SDK:+
+    <key>ANDROID_HOME</key><string>$ANDROID_SDK</string>
+    <key>ANDROID_SDK_ROOT</key><string>$ANDROID_SDK</string>}${JDK_HOME:+
+    <key>JAVA_HOME</key><string>$JDK_HOME</string>}${CA_BUNDLE:+
     <key>NODE_EXTRA_CA_CERTS</key><string>$CA_BUNDLE</string>}${ANTHROPIC_API_KEY:+
     <key>ANTHROPIC_API_KEY</key><string>$ANTHROPIC_API_KEY</string>}
   </dict>
@@ -217,6 +275,9 @@ fi
 say "Installing the Claude skill"
 mkdir -p "$SKILLDIR"
 cp "$REPO/skill/SKILL.md" "$SKILLDIR/SKILL.md"
+# The skill was called ios-sim-test before it could reach Android; leaving both
+# installed would offer an agent two skills for one job.
+if [ -d "$OLD_SKILLDIR" ]; then rm -rf "$OLD_SKILLDIR" && ok "removed the superseded ios-sim-test skill"; fi
 ok "$SKILLDIR"
 
 # ------------------------------------------------------------------ the MCP --

@@ -1,13 +1,18 @@
 ---
-name: ios-sim-test
-description: Validate an iOS change on a real simulator and get screenshots back as evidence. Hand off a build plus a test scenario, poll until it finishes, then attach the screenshots to a PR. Use when the user says "test this on a simulator", "prove this works", "check my change before I open the PR", "get me screenshots of X", or when you have just changed iOS UI code and are about to claim it works. Not for unit tests (use xcodebuild test) and not for TestFlight or device installs (use the asc-* and ipa-distribute skills).
+name: device-test
+description: Validate an iOS or Android UI change on a real simulator or emulator and get screenshots back as evidence. Hand off a build plus a test scenario, poll until it finishes, then attach the screenshots to a PR. Use when the user says "test this on a simulator", "test this on an emulator", "prove this works", "check my change before I open the PR", "get me screenshots of X", or when you have just changed mobile UI code and are about to claim it works. Not for unit tests (use xcodebuild test or gradle test) and not for TestFlight or device installs (use the asc-* and ipa-distribute skills).
 ---
 
-# Validating iOS changes on a simulator
+# Validating mobile changes on a simulator or emulator
 
-You have changed iOS UI code. Before telling anyone it works, run it and look
-at it. `simcheck` leases a pre-booted simulator, installs your build, drives
-the scenario you describe, and hands back named screenshots.
+You have changed mobile UI code. Before telling anyone it works, run it and
+look at it. `simcheck` leases a pre-booted iOS simulator or Android emulator,
+installs your build, drives the scenario you describe, and hands back named
+screenshots.
+
+You rarely need to say which platform: an `.apk` means Android and a `.app`
+means iOS, and the harness works it out from the build. Set
+`device.platform` only when nothing in the request implies one.
 
 The point is evidence. "I updated the toggle" is a claim; a screenshot of the
 toggle in its new state is proof, and it is what a reviewer actually wants.
@@ -31,8 +36,9 @@ build instead.
 Use the MCP tools when they are available — they return screenshots as images
 you can actually look at.
 
-1. `run_ios_test` — hand off the build and the scenario. Returns a `runId`
-   immediately. The run sits in `pending` until a simulator frees up.
+1. `run_device_test` — hand off the build and the scenario. Returns a `runId`
+   immediately. The run sits in `pending` until a device frees up.
+   (`run_ios_test` still works as a deprecated alias pinned to iOS.)
 2. `wait_for_test_run` — block until it finishes. If it comes back with
    `done: false`, call it again.
 3. `get_test_screenshot` — pull back each screenshot you asked for and **look at
@@ -64,8 +70,13 @@ When you are not on the machine holding the source — or your token lacks
 simcheck upload --scheme App --project App.xcodeproj --label "fix-toggle"
 ```
 
-An `.ipa` will **not** work. Those hold device slices; simulators need a build
-made for `platform=iOS Simulator`.
+An `.ipa` will **not** work on iOS. Those hold device slices; simulators need a
+build made for `platform=iOS Simulator`.
+
+On Android, submit an `.apk`. An `.aab` is not installable directly, and an
+APK built only for `x86_64` will install on an Apple-silicon emulator and then
+die at launch — it needs an `arm64-v8a` slice. The harness checks this before
+installing and says so.
 
 ## Describing the test
 
@@ -108,7 +119,19 @@ To author steps by hand, read the live screen first:
 simcheck inspect simcheck-01     # every element, with ids and coordinates
 ```
 
-or call `inspect_simulator`.
+or call `inspect_simulator` (it works for emulators too).
+
+## Multi-touch
+
+Pinch, two-finger pan and a real double tap need a driver on both platforms:
+`baguette` on iOS, and the bundled driver APK on Android (`./driver/build.sh`).
+Without it those steps fail with an explanation rather than being faked from a
+single-finger swipe.
+
+When the claim is about what a gesture *did* — that a zoom factor changed,
+that a callback fired — prefer the platform's own test suite over driving from
+outside: `xctest` on iOS, `instrumentation` on Android. Those can assert on
+state a screenshot cannot settle.
 
 ## Writing good scenarios
 

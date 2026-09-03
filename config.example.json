@@ -2,9 +2,30 @@
   "//": "Copy to ~/.simcheck/config.json and delete what you do not need.",
   "//_": "Every key is optional; omitted keys use the built-in default shown here.",
 
+  "//_platforms": "Which platforms this daemon serves. One whose toolchain is missing is reported as unavailable rather than blocking startup.",
+  "platforms": ["ios", "android"],
+  "defaultPlatform": "ios",
+
   "poolSize": 3,
   "deviceType": "iPhone 17 Pro",
   "runtime": "",
+
+  "//_android": "Defaults for pooled emulators. androidRuntime: '' means the newest installed system image.",
+  "androidDeviceType": "pixel_7",
+  "androidRuntime": "",
+  "androidGpu": "swiftshader_indirect",
+  "androidBootTimeoutMs": 300000,
+
+  "//_androidSdk": "Empty means: ANDROID_HOME, then ANDROID_SDK_ROOT, then the usual install locations.",
+  "androidSdk": "",
+  "//_androidDriver": "Built multi-touch driver APKs. Empty means the driver/ directory beside this install.",
+  "androidDriverDir": "",
+
+  "//_pool": "A heterogeneous pool, across platforms and runtimes. Overrides poolSize when set.",
+  "//_poolExample": [
+    { "platform": "ios", "deviceType": "iPhone 17 Pro", "runtime": "26.3", "count": 2 },
+    { "platform": "android", "deviceType": "pixel_7", "runtime": "35", "count": 1 }
+  ],
 
   "host": "127.0.0.1",
   "port": 8829,
