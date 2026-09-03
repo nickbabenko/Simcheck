@@ -23,6 +23,14 @@ export interface UiElement {
 export interface Screen {
   width: number;
   height: number;
+  /**
+   * What the coordinates are measured in. iOS reports points; Android's
+   * accessibility dump reports physical pixels. Taps use the same space the
+   * tree was read in either way, so the number is self-consistent -- but a
+   * model reasoning about "is 40 a plausible tap target" deserves to know
+   * which one it is looking at.
+   */
+  units: 'pt' | 'px';
   elements: UiElement[];
   /** Elements dropped by the cap, so the model knows the view is partial. */
   truncated: number;
@@ -55,11 +63,12 @@ export const clean = (s: string | null | undefined): string | undefined => {
  */
 export function finishScreen(
   elements: UiElement[], width: number, height: number, cap: number,
+  units: 'pt' | 'px' = 'pt',
 ): Screen {
   // Reading order: top to bottom, then left to right.
   elements.sort((a, b) => a.frame.y - b.frame.y || a.frame.x - b.frame.x);
   const truncated = Math.max(0, elements.length - cap);
-  return { width, height, elements: elements.slice(0, cap), truncated };
+  return { width, height, units, elements: elements.slice(0, cap), truncated };
 }
 
 /** Compact text rendering of a screen for the model prompt. */
@@ -74,7 +83,7 @@ export function renderScreen(screen: Screen): string {
     bits.push(`@${e.center.x},${e.center.y}`);
     return '  ' + bits.join(' ');
   });
-  const head = `screen ${screen.width}x${screen.height} pt, ${screen.elements.length} elements`;
+  const head = `screen ${screen.width}x${screen.height} ${screen.units ?? 'pt'}, ${screen.elements.length} elements`;
   const tail = screen.truncated ? `\n  ... ${screen.truncated} more elements hidden (scroll to reach them)` : '';
   return `${head}\n${lines.join('\n')}${tail}`;
 }
