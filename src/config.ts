@@ -82,6 +82,17 @@ export interface Config {
    */
   androidSdk: string;
   /**
+   * Where the built multi-touch driver APKs live. Empty means "the driver/
+   * directory beside this install". Without them the multi-touch steps fail
+   * with an explanation; everything else works.
+   */
+  androidDriverDir: string;
+  /** Emulator GPU mode. swiftshader_indirect is the reliable headless choice;
+   *  host is faster but does not always survive -no-window. */
+  androidGpu: string;
+  /** How long to wait for an emulator to boot before giving up. */
+  androidBootTimeoutMs: number;
+  /**
    * Who is allowed to reach the daemon at all, before token checks:
    *  - 'none'              loopback only (default, and correct on a dev machine)
    *  - 'cloudflare-access' verify the Cf-Access-Jwt-Assertion JWT in-process
@@ -159,6 +170,9 @@ const DEFAULTS: Config = {
   emulatorBin: 'emulator',
   avdmanagerBin: 'avdmanager',
   androidSdk: '',
+  androidDriverDir: '',
+  androidGpu: 'swiftshader_indirect',
+  androidBootTimeoutMs: 300_000,
   edgeAuth: 'none',
   edgeAllowLoopback: true,
   cloudflareTeamDomain: '',
@@ -179,7 +193,8 @@ const DEFAULTS: Config = {
 const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms']);
 const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
-  'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb']);
+  'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb',
+  'androidBootTimeoutMs']);
 
 /** Precedence: env > ~/.simcheck/config.json > defaults. */
 export function loadConfig(): Config {

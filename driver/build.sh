@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Build the simcheck multi-touch driver APKs.
+#
+# One-time setup: the harness installs the resulting APKs onto each pooled
+# emulator and drives one gesture per `am instrument` call. Without them,
+# pinch/pan/two_finger_press/double_tap fail with an explanation rather than
+# being approximated by a single-pointer swipe.
+#
+# Needs a JDK and Gradle. The output APKs are left in build/outputs/apk/.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if [ -z "${JAVA_HOME:-}" ]; then
+  for candidate in /opt/homebrew/opt/openjdk@21 /opt/homebrew/opt/openjdk@17 "$(/usr/libexec/java_home -v 17+ 2>/dev/null || true)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate/bin/java" ]; then export JAVA_HOME="$candidate"; break; fi
+  done
+fi
+[ -n "${JAVA_HOME:-}" ] || { echo "no JDK found. Try: brew install openjdk@21" >&2; exit 1; }
+export PATH="$JAVA_HOME/bin:$PATH"
+
+if [ -x ./gradlew ]; then
+  GRADLE=./gradlew
+elif command -v gradle >/dev/null; then
+  GRADLE=gradle
+else
+  echo "no Gradle found. Try: brew install gradle" >&2
+  exit 1
+fi
+
+echo "==> building the driver with $GRADLE (JAVA_HOME=$JAVA_HOME)"
+"$GRADLE" assembleDebug assembleDebugAndroidTest --no-daemon --console=plain
+
+echo
+echo "built:"
+find build/outputs/apk -name '*.apk' -print

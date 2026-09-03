@@ -91,6 +91,13 @@ export class Adb {
     return serial;
   }
 
+  /** The serial we last resolved for an AVD, without going to the device.
+   *  For callers that cannot await -- spawning a long-lived child, say -- and
+   *  are only reached once the device is known to be booted. */
+  cachedSerial(avd: string): string | null {
+    return this.serials.get(avd) ?? null;
+  }
+
   /** Forget a mapping, e.g. after killing an emulator. */
   forget(avd: string): void {
     this.serials.delete(avd);

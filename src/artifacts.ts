@@ -24,9 +24,19 @@ export interface Artifact {
   uploadedBy: string;      // token name
   label?: string;
   gitSha?: string;
-  /** Absolute path to the unpacked .app. */
+  /** Absolute path to the installable build: an unpacked .app on iOS, an
+   *  .apk on Android. */
   appPath: string;
 }
+
+/**
+ * Reads a package identifier out of a platform's build.
+ *
+ * Injected rather than imported so this store stays platform-neutral: it
+ * knows an upload is an APK because of what is inside the archive, not
+ * because it knows anything about Android.
+ */
+export type ManifestReader = (buildPath: string) => Promise<string>;
 
 /**
  * Content-addressed store of uploaded simulator .app bundles.
@@ -39,6 +49,13 @@ export class ArtifactStore {
 
   constructor(private cfg: Config) {
     this.root = path.join(cfg.home, 'artifacts');
+  }
+
+  /** Set by the daemon for each platform it can actually serve. */
+  private readers: Partial<Record<PlatformId, ManifestReader>> = {};
+
+  setManifestReader(platform: PlatformId, reader: ManifestReader): void {
+    this.readers[platform] = reader;
   }
 
   init(): void { fs.mkdirSync(this.root, { recursive: true }); }
@@ -110,7 +127,21 @@ export class ArtifactStore {
 
       fs.rmSync(dest, { recursive: true, force: true });
       fs.mkdirSync(dest, { recursive: true });
-      await execOk('/usr/bin/ditto', ['-x', '-k', staging, path.join(dest, 'unpacked')], { timeoutMs: 600_000 });
+      const unpacked = path.join(dest, 'unpacked');
+      await execOk('/usr/bin/ditto', ['-x', '-k', staging, unpacked], { timeoutMs: 600_000 });
+
+      // An .apk is itself a zip, so unpacking one yields its contents rather
+      // than a file. That is the tell: a manifest and dex at the top level
+      // means the upload *was* the installable, not an archive holding one.
+      if (fs.existsSync(path.join(unpacked, 'AndroidManifest.xml'))
+          && fs.readdirSync(unpacked).some((f) => f.endsWith('.dex'))) {
+        const apkPath = path.join(dest, 'app.apk');
+        fs.copyFileSync(staging, apkPath);
+        fs.rmSync(unpacked, { recursive: true, force: true });
+        return this.record(dest, {
+          id, platform: 'android', appPath: apkPath, appName: 'app.apk', bytes,
+        }, opts);
+      }
 
       let appPath = findApp(path.join(dest, 'unpacked'));
 
@@ -127,8 +158,17 @@ export class ArtifactStore {
         }
       }
       if (!appPath) {
+        // A zip of an .apk is the natural Android shape, and CI produces it
+        // as readily as it produces a zipped .app.
+        const apk = findByExtension(path.join(dest, 'unpacked'), '.apk')
+          ?? findByExtension(path.join(dest, 'nested'), '.apk');
+        if (apk) {
+          return this.record(dest, {
+            id, platform: 'android', appPath: apk, appName: path.basename(apk), bytes,
+          }, opts);
+        }
         fs.rmSync(dest, { recursive: true, force: true });
-        throw new HttpError(400, 'no .app bundle found inside the uploaded zip');
+        throw new HttpError(400, 'no .app bundle or .apk found inside the uploaded archive');
       }
       if (fs.existsSync(path.join(appPath, 'embedded.mobileprovision'))) {
         fs.rmSync(dest, { recursive: true, force: true });
@@ -143,21 +183,57 @@ export class ArtifactStore {
         throw new HttpError(400, `could not read CFBundleIdentifier from ${path.basename(appPath)}/Info.plist`);
       }
 
-      const artifact: Artifact = {
-        id, platform: 'ios', bundleId, appPath,
-        appName: path.basename(appPath),
-        bytes,
-        uploadedAt: nowIso(),
-        uploadedBy: opts.uploadedBy,
-        ...(opts.label ? { label: opts.label } : {}),
-        ...(opts.gitSha ? { gitSha: opts.gitSha } : {}),
-      };
-      fs.writeFileSync(path.join(dest, 'artifact.json'), JSON.stringify(artifact, null, 2));
-      log.info(`stored artifact ${id} (${artifact.appName}, ${(bytes / 1e6).toFixed(1)}MB) from ${opts.uploadedBy}`);
-      return artifact;
+      return this.record(dest, {
+        id, platform: 'ios', appPath, appName: path.basename(appPath), bytes, bundleId,
+      }, opts);
     } finally {
       fs.rmSync(staging, { force: true });
     }
+  }
+
+  /**
+   * Write an artifact's metadata and return it.
+   *
+   * The package identifier is read through the platform's own reader when one
+   * is registered. A daemon that cannot serve that platform still accepts the
+   * upload -- it simply cannot name what is inside, and says so by leaving
+   * bundleId empty rather than guessing.
+   */
+  private async record(dest: string, base: {
+    id: string; platform: PlatformId; appPath: string; appName: string; bytes: number; bundleId?: string;
+  }, opts: { uploadedBy: string; label?: string; gitSha?: string }): Promise<Artifact> {
+    let bundleId = base.bundleId ?? '';
+    if (!bundleId) {
+      const reader = this.readers[base.platform];
+      if (reader) {
+        try {
+          bundleId = await reader(base.appPath);
+        } catch (e) {
+          fs.rmSync(dest, { recursive: true, force: true });
+          throw new HttpError(400,
+            `could not read the package identifier from ${base.appName}: ${(e as Error).message}`);
+        }
+      } else {
+        log.warn(`no ${base.platform} manifest reader registered; storing ${base.id} without a package id`);
+      }
+    }
+
+    const artifact: Artifact = {
+      id: base.id,
+      platform: base.platform,
+      bundleId,
+      appPath: base.appPath,
+      appName: base.appName,
+      bytes: base.bytes,
+      uploadedAt: nowIso(),
+      uploadedBy: opts.uploadedBy,
+      ...(opts.label ? { label: opts.label } : {}),
+      ...(opts.gitSha ? { gitSha: opts.gitSha } : {}),
+    };
+    fs.mkdirSync(dest, { recursive: true });
+    fs.writeFileSync(path.join(dest, 'artifact.json'), JSON.stringify(artifact, null, 2));
+    log.info(`stored ${artifact.platform} artifact ${artifact.id} (${artifact.appName}, ${(artifact.bytes / 1e6).toFixed(1)}MB) from ${opts.uploadedBy}`);
+    return artifact;
   }
 
   /** Drop artifacts older than the retention window, newest always kept. */
@@ -208,4 +284,21 @@ function plist(appPath: string, key: string): string | undefined {
   const r = spawnSync('/usr/libexec/PlistBuddy',
     ['-c', `Print :${key}`, path.join(appPath, 'Info.plist')], { encoding: 'utf8' });
   return r.status === 0 ? String(r.stdout).trim() || undefined : undefined;
+}
+
+/** First file with the given extension, breadth-first. Used to spot an .apk
+ *  inside an archive, where a directory-shaped .app search would find nothing. */
+function findByExtension(dir: string, ext: string, depth = 0): string | null {
+  if (depth > 4 || !fs.existsSync(dir)) return null;
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+  for (const e of entries) {
+    if (e.isFile() && e.name.toLowerCase().endsWith(ext)) return path.join(dir, e.name);
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const hit = findByExtension(path.join(dir, e.name), ext, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
 }

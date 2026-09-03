@@ -12,6 +12,7 @@ import { AuditLog } from './audit.js';
 import { ArtifactStore } from './artifacts.js';
 import { createEdgeVerifier, caBundleStatus } from './edge.js';
 import { loadPlatforms } from './platforms.js';
+import { androidManifestReader } from './android/index.js';
 import { logger, logToFile } from './log.js';
 
 const log = logger('daemon');
@@ -46,6 +47,12 @@ async function main(): Promise<void> {
 
   const artifacts = new ArtifactStore(cfg);
   artifacts.init();
+  // An uploaded .apk is only identifiable if something can read its manifest,
+  // and that is Android's business rather than the store's.
+  if (platforms.has('android')) {
+    const reader = androidManifestReader(cfg);
+    if (reader) artifacts.setManifestReader('android', reader);
+  }
   artifacts.prune(cfg.artifactRetentionDays);
 
   const store = new Store(cfg);

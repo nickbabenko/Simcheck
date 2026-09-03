@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The driver instruments itself rather than an app under test: a UiAutomator
+  instrumentation runs with shell privileges and can inject input into any
+  process, so it needs no relationship with the app whose UI it is driving.
+  That is what makes one installed driver work for every build the pool tests.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

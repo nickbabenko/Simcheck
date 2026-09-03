@@ -2,6 +2,7 @@ import type { Config } from './config.js';
 import type { PlatformId, PlatformSupport } from './device.js';
 import { PLATFORMS } from './device.js';
 import { createIosPlatform } from './ios/index.js';
+import { createAndroidPlatform } from './android/index.js';
 import { logger } from './log.js';
 
 const log = logger('platforms');
@@ -10,8 +11,8 @@ type Factory = (cfg: Config) => Promise<PlatformSupport>;
 
 const FACTORIES: Record<PlatformId, Factory> = {
   ios: createIosPlatform,
-  // android: createAndroidPlatform,
-} as Record<PlatformId, Factory>;
+  android: createAndroidPlatform,
+};
 
 /**
  * Which platforms this daemon can actually serve.
