@@ -18,6 +18,17 @@ fi
 [ -n "${JAVA_HOME:-}" ] || { echo "no JDK found. Try: brew install openjdk@21" >&2; exit 1; }
 export PATH="$JAVA_HOME/bin:$PATH"
 
+# AGP resolves the SDK from ANDROID_HOME or local.properties and fails the
+# build outright without one. A login shell often has it; a script run from an
+# installer or a daemon does not, so resolve it here rather than assume.
+if [ -z "${ANDROID_HOME:-}" ]; then
+  for candidate in "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" /opt/homebrew/share/android-commandlinetools /usr/local/share/android-commandlinetools; do
+    if [ -n "$candidate" ] && [ -d "$candidate" ]; then export ANDROID_HOME="$candidate"; break; fi
+  done
+fi
+[ -n "${ANDROID_HOME:-}" ] || { echo "no Android SDK found. Try: brew install --cask android-commandlinetools" >&2; exit 1; }
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+
 if [ -x ./gradlew ]; then
   GRADLE=./gradlew
 elif command -v gradle >/dev/null; then
@@ -27,7 +38,9 @@ else
   exit 1
 fi
 
-echo "==> building the driver with $GRADLE (JAVA_HOME=$JAVA_HOME)"
+echo "==> building the driver with $GRADLE"
+echo "    JAVA_HOME=$JAVA_HOME"
+echo "    ANDROID_HOME=$ANDROID_HOME"
 "$GRADLE" assembleDebug assembleDebugAndroidTest --no-daemon --console=plain
 
 echo

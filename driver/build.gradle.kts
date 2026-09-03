@@ -42,7 +42,8 @@ android {
 }
 
 dependencies {
+    // Just the runner: the gestures are assembled from MotionEvents directly,
+    // so uiautomator's UiObject-bound helpers are not needed.
     androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     androidTestImplementation("junit:junit:4.13.2")
 }
