@@ -11,10 +11,8 @@ import { TokenStore } from './auth.js';
 import { AuditLog } from './audit.js';
 import { ArtifactStore } from './artifacts.js';
 import { createEdgeVerifier, caBundleStatus } from './edge.js';
-import { Axe } from './axe.js';
-import { Baguette } from './baguette.js';
+import { loadPlatforms } from './platforms.js';
 import { logger, logToFile } from './log.js';
-import { exec } from './util.js';
 
 const log = logger('daemon');
 
@@ -25,7 +23,10 @@ async function main(): Promise<void> {
   }
   logToFile(paths(cfg).log);
 
-  await preflight(cfg.axeBin, cfg);
+  // Each platform checks its own toolchain. One missing is a warning and a
+  // clear refusal later; all missing is fatal, since no run could succeed.
+  const platforms = await loadPlatforms(cfg);
+  log.info(`platforms: ${platforms.available().join(', ')}`);
 
   const ca = caBundleStatus(cfg);
   if (ca.configured && !ca.ok) {
@@ -51,20 +52,16 @@ async function main(): Promise<void> {
   store.load();
 
   const llm = await createLlm(cfg);
-  const pool = new Pool(cfg);
-  const multiTouch = await Baguette.available(cfg.baguetteBin);
-  log.info(multiTouch
-    ? `multi-touch via baguette ${multiTouch}`
-    : 'multi-touch unavailable (no baguette on PATH) -- pinch/pan/double_tap will fail with an install hint');
-
-  const runner = new Runner(cfg, pool, store, llm, artifacts, Boolean(multiTouch));
+  const pool = new Pool(cfg, platforms);
+  const runner = new Runner(cfg, pool, store, llm, artifacts, platforms);
   const scheduler = new Scheduler(cfg, pool, store, runner);
 
   const edge = await createEdgeVerifier(cfg);
   log.info(`edge auth: ${edge.describe()}`);
 
   const server = createServer({
-    cfg, pool, store, runner, scheduler, tokens, audit, artifacts, edge, llmName: llm?.name ?? null,
+    cfg, pool, store, runner, scheduler, tokens, audit, artifacts, edge, platforms,
+    llmName: llm?.name ?? null,
   });
 
   // Binding beyond loopback with no edge auth would publish an RCE surface.
@@ -86,7 +83,7 @@ async function main(): Promise<void> {
   // Serve requests immediately; the pool fills in the background.
   scheduler.start();
   pool.start().then(
-    () => log.info(`pool warm: ${pool.list().filter((d) => d.status === 'ready').length}/${cfg.poolSize} ready`),
+    () => log.info(`pool warm: ${pool.list().filter((d) => d.status === 'ready').length}/${pool.targetCount()} ready`),
     (e) => log.error('pool failed to start', (e as Error).message),
   );
 
@@ -103,21 +100,6 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
-}
-
-/** Fail loudly at boot rather than mysteriously on the first run. */
-async function preflight(axeBin: string, cfg?: { caBundle: string }): Promise<void> {
-  const xcode = await exec('xcrun', ['simctl', 'help'], { timeoutMs: 30_000 });
-  if (xcode.code !== 0) {
-    throw new Error('xcrun simctl is unavailable. Install Xcode and run: sudo xcode-select -s /Applications/Xcode.app');
-  }
-  const version = await Axe.available(axeBin);
-  if (!version) {
-    throw new Error(
-      `the AXe CLI ("${axeBin}") is not on PATH. It drives taps and typing on the simulator.\n` +
-      '  brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe');
-  }
-  log.info(`axe ${version}`);
 }
 
 main().catch((e) => {

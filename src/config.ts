@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import type { PlatformId } from './device.js';
 
 export interface Config {
   /** Where runs, artifacts, the token and the pool state live. */
@@ -9,8 +10,15 @@ export interface Config {
   host: string;
   port: number;
   /**
-   * How many pre-booted simulators to keep ready, of `deviceType`/`runtime`.
-   * Ignored when `pool` is set.
+   * Which platforms this daemon serves. A platform listed here whose toolchain
+   * is missing is reported as unavailable rather than blocking startup.
+   */
+  platforms: PlatformId[];
+  /** Platform for a run that names none and whose app does not imply one. */
+  defaultPlatform: PlatformId;
+  /**
+   * How many pre-booted devices to keep ready, of `deviceType`/`runtime` on
+   * `defaultPlatform`. Ignored when `pool` is set.
    */
   poolSize: number;
   deviceType: string;
@@ -27,7 +35,15 @@ export interface Config {
    *   [{ "deviceType": "iPhone 17 Pro", "runtime": "26.3", "count": 2 },
    *    { "deviceType": "iPhone 17 Pro", "runtime": "27.0", "count": 1 }]
    */
-  pool: { deviceType?: string; runtime?: string; count?: number }[];
+  pool: { platform?: PlatformId; deviceType?: string; runtime?: string; count?: number }[];
+  /** Default Android device profile for pooled emulators, e.g. "pixel_7". */
+  androidDeviceType: string;
+  /**
+   * Default Android system image. Empty means "newest installed". Give either
+   * an API level ("35"), a package ("system-images;android-35;google_apis;arm64-v8a")
+   * or a label ("Android 15").
+   */
+  androidRuntime: string;
   /**
    * Create a simulator on demand when a run asks for a device the pool does
    * not hold. The run waits for a cold boot instead of failing -- slower, but
@@ -57,6 +73,14 @@ export interface Config {
   axeBin: string;
   /** Multi-touch driver. Optional: only pinch/pan/double_tap need it. */
   baguetteBin: string;
+  adbBin: string;
+  emulatorBin: string;
+  avdmanagerBin: string;
+  /**
+   * Android SDK root. Empty means "work it out" -- ANDROID_HOME, then
+   * ANDROID_SDK_ROOT, then the usual install locations.
+   */
+  androidSdk: string;
   /**
    * Who is allowed to reach the daemon at all, before token checks:
    *  - 'none'              loopback only (default, and correct on a dev machine)
@@ -110,6 +134,8 @@ const DEFAULTS: Config = {
   home: HOME,
   host: '127.0.0.1',
   port: 8829,
+  platforms: ['ios', 'android'],
+  defaultPlatform: 'ios',
   poolSize: 3,
   pool: [],
   autoProvision: true,
@@ -117,6 +143,8 @@ const DEFAULTS: Config = {
   minFreeDiskGb: 6,
   deviceType: 'iPhone 17 Pro',
   runtime: '',                 // '' = newest available iOS runtime
+  androidDeviceType: 'pixel_7',
+  androidRuntime: '',          // '' = newest installed system image
   devicePrefix: 'simcheck',
   defaultTimeoutMs: 10 * 60_000,
   defaultMaxActions: 60,
@@ -127,6 +155,10 @@ const DEFAULTS: Config = {
   retainRuns: 200,
   axeBin: 'axe',
   baguetteBin: 'baguette',
+  adbBin: 'adb',
+  emulatorBin: 'emulator',
+  avdmanagerBin: 'avdmanager',
+  androidSdk: '',
   edgeAuth: 'none',
   edgeAllowLoopback: true,
   cloudflareTeamDomain: '',
@@ -144,7 +176,7 @@ const DEFAULTS: Config = {
   artifactRetentionDays: 14,
 };
 
-const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts']);
+const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms']);
 const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
   'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb']);
@@ -173,6 +205,12 @@ export function loadConfig(): Config {
 }
 
 const camelToSnake = (s: string) => s.replace(/[A-Z]/g, (c) => `_${c}`).toUpperCase();
+
+/** The pool's default device type and runtime for one platform. */
+export const platformDefaults = (cfg: Config, platform: PlatformId): { deviceType: string; runtime: string } =>
+  platform === 'android'
+    ? { deviceType: cfg.androidDeviceType, runtime: cfg.androidRuntime }
+    : { deviceType: cfg.deviceType, runtime: cfg.runtime };
 
 export const paths = (cfg: Config) => ({
   runs: path.join(cfg.home, 'runs'),

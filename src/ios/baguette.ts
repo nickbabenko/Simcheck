@@ -1,5 +1,6 @@
-import { exec, execOk } from './util.js';
-import { logger } from './log.js';
+import { exec, execOk } from '../util.js';
+import { logger } from '../log.js';
+import type { TouchDriver } from '../device.js';
 
 const log = logger('baguette');
 
@@ -14,7 +15,7 @@ const log = logger('baguette');
  * It is an optional dependency: without it, only the multi-touch actions fail,
  * and they fail with an install hint rather than something cryptic.
  */
-export class Baguette {
+export class Baguette implements TouchDriver {
   constructor(private bin: string, private udid: string) {}
 
   private async run(args: string[], signal?: AbortSignal): Promise<void> {

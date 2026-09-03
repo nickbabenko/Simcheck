@@ -24,12 +24,15 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     { name: 'simcheck', version: '0.1.0' },
     {
       instructions: [
-        'simcheck runs a build on a pre-booted iOS simulator, drives a test scenario, and returns screenshots as evidence.',
+        'simcheck runs a build on a pre-booted iOS simulator or Android emulator, drives a test scenario, and returns screenshots as evidence.',
         '',
         'Use it to prove a UI change actually works before asking for PR review, rather than asserting it does.',
         '',
-        'The normal shape is: run_ios_test -> wait_for_test_run -> get_test_screenshot for each screenshot you asked for.',
-        'run_ios_test returns immediately with a run id; the run sits in "pending" until a simulator in the pool frees up.',
+        'The normal shape is: run_device_test -> wait_for_test_run -> get_test_screenshot for each screenshot you asked for.',
+        'run_device_test returns immediately with a run id; the run sits in "pending" until a device in the pool frees up.',
+        '',
+        'The platform is usually inferred from the build -- an .apk means Android, a .app means iOS -- so you rarely',
+        'need to set it. Say device.platform explicitly when nothing else in the request implies one.',
         '',
         'Tokens are scoped. If a submission is refused with a missing-capability error, call whoami:',
         'a remote token generally cannot name paths on the host and must use an uploaded build (artifactId) instead.',
@@ -49,39 +52,43 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     runId: z.number().optional().describe('Restrict to one workflow run.'),
     branch: z.string().optional().describe('Restrict to artifacts built from this branch.'),
   }).optional().describe('Test the newest matching GitHub Actions artifact. The harness resolves and downloads it using its own stored credentials, so no token passes through you. This is the usual way to test a CI build.'),
-    path: z.string().optional().describe('Absolute path to a built simulator .app bundle, or a .zip containing one. Only usable by a token with the runs:submit:local capability. An .ipa will not work -- those are device builds.'),
-    project: z.string().optional().describe('Absolute path to an .xcodeproj, to build from source instead.'),
-    workspace: z.string().optional().describe('Absolute path to an .xcworkspace, to build from source instead.'),
-    scheme: z.string().optional().describe('Scheme to build. Required when building from source.'),
-    configuration: z.string().optional().describe('Build configuration. Defaults to Debug.'),
-    bundleId: z.string().optional().describe('Only needed if it cannot be read from the app Info.plist.'),
-    launchArgs: z.array(z.string()).optional().describe('Arguments passed to the app on launch, e.g. ["-UITestMode", "1"].'),
-    launchEnv: z.record(z.string(), z.string()).optional().describe('Environment variables for the app process.'),
-  }).describe('Which build to test. Give one of: `url` (a zipped simulator .app to download), `artifactId` (already uploaded), `path`, `scheme` plus `project`/`workspace`, or `bundleId` alone (already installed).');
+    path: z.string().optional().describe('Absolute path to a built simulator .app bundle or an Android .apk, or a .zip containing one. Only usable by a token with the runs:submit:local capability. An .ipa will not work -- those are device builds.'),
+    project: z.string().optional().describe('iOS: absolute path to an .xcodeproj. Android: absolute path to the Gradle project directory (the one holding gradlew). Builds from source instead.'),
+    workspace: z.string().optional().describe('iOS only: absolute path to an .xcworkspace, to build from source instead.'),
+    scheme: z.string().optional().describe('iOS only: scheme to build. Required when building an iOS app from source.'),
+    configuration: z.string().optional().describe('iOS only: build configuration. Defaults to Debug.'),
+    module: z.string().optional().describe('Android only: Gradle module to assemble, e.g. ":app". Defaults to ":app".'),
+    variant: z.string().optional().describe('Android only: build variant, e.g. "debug" or "freeRelease". Defaults to "debug".'),
+    bundleId: z.string().optional().describe('Bundle id on iOS, package name on Android. Only needed if it cannot be read from the built app.'),
+    launchArgs: z.array(z.string()).optional().describe('iOS only: arguments passed to the app on launch, e.g. ["-UITestMode", "1"].'),
+    launchEnv: z.record(z.string(), z.string()).optional().describe('Environment variables for the app process on iOS; string intent extras on Android.'),
+  }).describe('Which build to test. Give one of: `url` (a zipped .app or an .apk to download), `artifactId` (already uploaded), `path`, `scheme` plus `project`/`workspace` (iOS source), `project` plus `module` (Android source), or `bundleId` alone (already installed).');
   
   const deviceSchema = z.object({
-    name: z.string().optional().describe('Device type, e.g. "iPhone 17 Pro". Defaults to whatever the pool holds.'),
-    runtime: z.string().optional().describe('Runtime, e.g. "iOS 27.0".'),
-    udid: z.string().optional().describe('Pin the run to one specific pooled simulator.'),
-  }).describe('Which simulator to lease. Omit to take the first free one.');
+    platform: z.enum(['ios', 'android']).optional().describe('Which platform to run on. Inferred from the build when omitted -- an .apk means Android -- so set it only when nothing else in the request implies one.'),
+    name: z.string().optional().describe('Device type, e.g. "iPhone 17 Pro" or "pixel_7". Defaults to whatever the pool holds.'),
+    runtime: z.string().optional().describe('Runtime, e.g. "iOS 27.0" or "android-35".'),
+    udid: z.string().optional().describe('Pin the run to one specific pooled device (its UDID on iOS, its AVD name on Android).'),
+  }).describe('Which device to lease. Omit to take the first free one.');
   
   /* -------------------------------------------------------------------- tools */
   
-  server.registerTool('run_ios_test', {
-    title: 'Run an iOS test scenario',
-    description: [
-      'Queue a test run on a pooled iOS simulator and return immediately with a run id.',
-      '',
-      'Give ONE of: `scenario` (natural language -- an agent drives the UI and works out the taps), `steps` (exact actions, deterministic and free), or `xctest` (run the app\'s own XCUITest bundle, for assertions the screen cannot settle).',
-      'Name the screenshots you want in `screenshots`; the run is marked failed if it never reaches a state where it can capture one.',
-      'Use `assert` to state what must be true for the run to pass.',
-      '',
-      'The run starts as "pending" and moves to "running" when a simulator frees up. Poll with wait_for_test_run.',
-    ].join('\n'),
-    inputSchema: {
-      app: appSchema,
-      scenario: z.string().optional().describe('What to do, in plain English. e.g. "Log in as demo@test.com / hunter2, open Settings from the tab bar, and turn on Dark Mode."'),
-      xctest: z.object({
+  const instrumentationSchema = z.object({
+    project: z.string().optional().describe('Absolute path to the Gradle project directory (the one holding gradlew), to build the app and test APKs from source.'),
+    module: z.string().optional().describe('Gradle module. Defaults to ":app".'),
+    variant: z.string().optional().describe('Build variant. Defaults to "debug".'),
+    testApk: z.string().optional().describe('Absolute path to a pre-built androidTest APK. Skips the Gradle build, so it works even where the project cannot be compiled. Requires appApk alongside it.'),
+    appApk: z.string().optional().describe('Absolute path to the app APK the test APK instruments. Required with testApk.'),
+    runner: z.string().optional().describe('Instrumentation runner class. Read from the test APK manifest when omitted.'),
+    only: z.array(z.string()).optional().describe('Restrict to these tests, e.g. ["com.example.PinchTest#testZoom"].'),
+    skip: z.array(z.string()).optional().describe('Exclude these tests or classes.'),
+    timeoutMs: z.number().optional(),
+  }).describe('Android only: run an instrumentation suite (Espresso/UiAutomator) instead of driving the UI from outside. Use this when the claim needs an assertion the screen cannot settle -- that a gesture changed a scale factor, that a callback fired, that state is correct rather than merely looking correct. Instrumentation also has genuine multi-touch, which `adb` input does not. Cannot be combined with scenario or steps.');
+
+  const runInput = {
+    app: appSchema,
+    scenario: z.string().optional().describe('What to do, in plain English. e.g. "Log in as demo@test.com / hunter2, open Settings from the tab bar, and turn on Dark Mode."'),
+    xctest: z.object({
       xctestrun: z.string().optional().describe('Absolute path to a pre-built .xctestrun. Runs test-without-building, so it works even where the project cannot be compiled.'),
       project: z.string().optional().describe('Absolute path to an .xcodeproj, to build and test from source.'),
       workspace: z.string().optional().describe('Absolute path to an .xcworkspace.'),
@@ -91,17 +98,19 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       only: z.array(z.string()).optional().describe('-only-testing entries, e.g. ["AppUITests/PinchTests/testZoom"].'),
       skip: z.array(z.string()).optional().describe('-skip-testing entries.'),
       timeoutMs: z.number().optional(),
-    }).optional().describe('Run an XCUITest bundle instead of driving the UI from outside. Use this when the claim needs an assertion the screen cannot settle -- that a gesture changed zoomScale, that a delegate fired, that state is correct rather than merely looking correct. XCUITest also has genuine multi-touch. Cannot be combined with scenario or steps.'),
-    steps: z.array(z.record(z.string(), z.any())).optional().describe('Exact actions instead of a scenario. Each is {"action":"tap"|"type"|"screenshot"|"wait"|"wait_for"|"gesture"|"button"|"swipe"|"pinch"|"pan"|"two_finger_press"|"double_tap"|"open_url"|"appearance"|"launch"|"relaunch"|"terminate"|"clear_text"|"press_enter", ...}. Multi-touch: pinch takes `scale` (3 = zoom to 3x, 0.4 = pinch back in) or exact `startSpread`/`endSpread`; two_finger_press puts two fingers down with no travel, which isolates whether the app reacts to the second contact landing rather than to the spread. Unknown keys are rejected rather than ignored.'),
-      screenshots: z.array(z.string()).optional().describe('Names of the screenshots to capture, e.g. ["login", "settings", "dark-mode-on"].'),
-      assert: z.string().optional().describe('What must hold for a pass, e.g. "the Settings screen renders with a dark background and the toggle reads On".'),
-      device: deviceSchema.optional(),
-      timeoutMs: z.number().optional().describe('Hard limit on the whole run. Default 10 minutes.'),
-      maxActions: z.number().optional().describe('Cap on simulator actions in scenario mode. Default 60.'),
-      resetPolicy: z.enum(['uninstall', 'erase']).optional().describe('"uninstall" (fast, default) or "erase" for a full factory reset between runs.'),
-      label: z.string().optional().describe('Short human label, shown in listings and on the report.'),
-    },
-  }, async (args) => {
+    }).optional().describe('iOS only: run an XCUITest bundle instead of driving the UI from outside. Use this when the claim needs an assertion the screen cannot settle -- that a gesture changed zoomScale, that a delegate fired, that state is correct rather than merely looking correct. XCUITest also has genuine multi-touch. Cannot be combined with scenario or steps.'),
+    instrumentation: instrumentationSchema.optional(),
+    steps: z.array(z.record(z.string(), z.any())).optional().describe('Exact actions instead of a scenario. Each is {"action":"tap"|"type"|"screenshot"|"wait"|"wait_for"|"gesture"|"button"|"swipe"|"pinch"|"pan"|"two_finger_press"|"double_tap"|"open_url"|"appearance"|"launch"|"relaunch"|"terminate"|"clear_text"|"press_enter", ...}. Multi-touch (pinch, pan, two_finger_press, double_tap) is iOS-only and needs the baguette driver; on Android those steps fail with an explanation, because `adb shell input` drives a single pointer -- assert the gesture from an instrumentation test instead. Hardware buttons differ by platform: home/lock/side-button/siri/apple-pay on iOS, home/back/recents/power/volume-up/volume-down/menu on Android. Unknown keys are rejected rather than ignored.'),
+    screenshots: z.array(z.string()).optional().describe('Names of the screenshots to capture, e.g. ["login", "settings", "dark-mode-on"].'),
+    assert: z.string().optional().describe('What must hold for a pass, e.g. "the Settings screen renders with a dark background and the toggle reads On".'),
+    device: deviceSchema.optional(),
+    timeoutMs: z.number().optional().describe('Hard limit on the whole run. Default 10 minutes.'),
+    maxActions: z.number().optional().describe('Cap on device actions in scenario mode. Default 60.'),
+    resetPolicy: z.enum(['uninstall', 'erase']).optional().describe('"uninstall" (fast, default) or "erase" for a full factory reset between runs.'),
+    label: z.string().optional().describe('Short human label, shown in listings and on the report.'),
+  };
+
+  const submitRun = async (args: unknown) => {
     const request = args as unknown as RunRequest;
     if (request.steps) request.steps = request.steps as unknown as Step[];
     const run = await client.submit(request);
@@ -110,11 +119,37 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       status: run.status,
       queuePosition: run.queuePosition ?? 0,
       mode: run.mode,
+      platform: run.device?.platform ?? run.request.device?.platform ?? null,
       next: `Call wait_for_test_run with runId "${run.id}".`,
       dir: run.dir,
     });
-  });
-  
+  };
+
+  server.registerTool('run_device_test', {
+    title: 'Run a test scenario on a simulator or emulator',
+    description: [
+      'Queue a test run on a pooled iOS simulator or Android emulator and return immediately with a run id.',
+      '',
+      'Give ONE of: `scenario` (natural language -- an agent drives the UI and works out the taps), `steps` (exact actions, deterministic and free), `xctest` (the app\'s own XCUITest bundle, iOS) or `instrumentation` (the app\'s own instrumentation suite, Android).',
+      'Name the screenshots you want in `screenshots`; the run is marked failed if it never reaches a state where it can capture one.',
+      'Use `assert` to state what must be true for the run to pass.',
+      '',
+      'The platform is inferred from the build unless you set device.platform.',
+      'The run starts as "pending" and moves to "running" when a device frees up. Poll with wait_for_test_run.',
+    ].join('\n'),
+    inputSchema: runInput,
+  }, submitRun);
+
+  // The original name, kept so existing skills and saved requests keep working.
+  server.registerTool('run_ios_test', {
+    title: 'Run an iOS test scenario (alias)',
+    description: 'Deprecated alias for run_device_test, pinned to iOS. Prefer run_device_test, which also reaches Android.',
+    inputSchema: runInput,
+  }, (args: unknown) => submitRun({
+    ...(args as Record<string, unknown>),
+    device: { ...((args as { device?: Record<string, unknown> }).device ?? {}), platform: 'ios' },
+  }));
+
   server.registerTool('wait_for_test_run', {
     title: 'Wait for a test run to finish',
     description: 'Block until the run reaches a terminal state, or until the wait budget runs out. ' +
@@ -186,8 +221,8 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
   }, async ({ runId }) => json(outcome(await client.cancel(runId))));
   
   server.registerTool('sim_pool_status', {
-    title: 'Simulator pool status',
-    description: 'How many simulators are ready, busy or still pending, and how many runs are queued. Check here if runs are sitting in "pending".',
+    title: 'Device pool status',
+    description: 'How many simulators and emulators are ready, busy or still pending, and how many runs are queued. Check here if runs are sitting in "pending".',
     inputSchema: {},
   }, async () => {
     const pool = await client.pool();
@@ -197,16 +232,16 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       queued: pool.queued,
       running: pool.active,
       devices: pool.devices.map((d) => ({
-        name: d.name, status: d.status, deviceType: d.deviceType, runtime: d.runtime,
+        name: d.name, platform: d.platform, status: d.status, deviceType: d.deviceType, runtime: d.runtime,
         udid: d.udid, runId: d.currentRunId ?? null, error: d.lastError ?? null,
       })),
     });
   });
   
   server.registerTool('sim_pool_remove', {
-    title: 'Remove a simulator from the pool',
+    title: 'Remove a device from the pool',
     description: [
-      'Delete a pooled simulator, freeing its disk (roughly 3GB each).',
+      'Delete a pooled simulator or emulator, freeing its disk.',
       'Refuses while it is running a test unless you pass force.',
     ].join('\n'),
     inputSchema: {
@@ -216,9 +251,9 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
   }, async ({ udid, force }) => json(await client.removeDevice(udid, force ?? false)));
 
   server.registerTool('sim_pool_add', {
-    title: 'Add simulators to the pool',
+    title: 'Add devices to the pool',
     description: [
-      'Create and boot extra simulators. They are added in "pending" and become "ready" once booted, roughly half a minute each.',
+      'Create and boot extra simulators or emulators. They are added in "pending" and become "ready" once booted -- roughly half a minute for a simulator, longer for an emulator.',
       '',
       'You usually do NOT need this: a run asking for a device the pool lacks provisions one automatically -- it just starts slower.',
       'Use this to warm a device ahead of time when you know you will need it, or to widen the pool for concurrency.',
@@ -226,13 +261,14 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     ].join('\n'),
     inputSchema: {
       count: z.number().optional().describe('How many to add. Default 1.'),
-      deviceType: z.string().optional().describe('e.g. "iPhone 17 Pro". Defaults to the pool default.'),
-      runtime: z.string().optional().describe('e.g. "iOS 27.0". Defaults to the newest installed.'),
+      platform: z.enum(['ios', 'android']).optional().describe('Defaults to the daemon\'s default platform.'),
+      deviceType: z.string().optional().describe('e.g. "iPhone 17 Pro" or "pixel_7". Defaults to the pool default for that platform.'),
+      runtime: z.string().optional().describe('e.g. "iOS 27.0" or "android-35". Defaults to the newest installed.'),
     },
   }, async (args) => {
     const { added, pool } = await client.addDevices(args);
     return json({
-      added: added.map((d) => ({ name: d.name, udid: d.udid, status: d.status, deviceType: d.deviceType, runtime: d.runtime })),
+      added: added.map((d) => ({ name: d.name, udid: d.udid, platform: d.platform, status: d.status, deviceType: d.deviceType, runtime: d.runtime })),
       note: 'Added as pending; they will be picked up and booted shortly.',
       counts: pool.counts,
     });
@@ -272,7 +308,7 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
   server.registerTool('get_upload_command', {
   title: 'How CI should upload a build',
   description: [
-    'The exact command a CI job runs to push a simulator build into this harness, and the run request that then tests it.',
+    'The exact command a CI job runs to push a build into this harness, and the run request that then tests it.',
     'Use this when someone asks how to wire up CI: it is one curl, needs no GitHub token on the harness, and works with any CI provider.',
   ].join('\n'),
   inputSchema: {
@@ -282,19 +318,24 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
   const { upload } = await client.health() as unknown as { upload?: string };
   const url = upload ?? '<the harness public URL>/upload';
   return { content: [{ type: 'text' as const, text: [
-    '# 1. In CI, after building for the simulator:',
+    '# 1a. iOS, after building for the simulator:',
     'ditto -c -k --keepParent "$APP_PATH" App.zip',
     `curl -sS -X POST "${url}${label ? `?label=${encodeURIComponent(label)}` : '?label=$GITHUB_REF_NAME'}" \\`,
     '  -H "Authorization: Bearer $SIMCHECK_TOKEN" \\',
     '  -H "Content-Type: application/zip" \\',
     '  --data-binary @App.zip',
     '',
+    '',
+    '# 1b. Android: upload the .apk directly, no zipping needed.',
+    '#   curl ... -H "Content-Type: application/vnd.android.package-archive" --data-binary @app-debug.apk',
+    '',
     '# It prints JSON containing an "id". Then test that build:',
-    '#   run_ios_test { "app": { "artifactId": "<id>" }, "scenario": "...", "screenshots": [...] }',
+    '#   run_device_test { "app": { "artifactId": "<id>" }, "scenario": "...", "screenshots": [...] }',
     '',
     '# The CI token needs the artifacts:write capability:',
     '#   simcheck token create ci --preset remote',
     '# An .ipa will not work -- build with -destination "generic/platform=iOS Simulator".',
+    '# An x86_64-only .apk will not run on an Apple-silicon emulator -- include an arm64-v8a slice.',
   ].join('\n') }] };
 });
 
@@ -306,13 +347,13 @@ server.registerTool('whoami', {
   
   server.registerTool('list_uploaded_builds', {
     title: 'List uploaded builds',
-    description: 'Simulator .app bundles that have been uploaded to this harness, newest first. Reference one by its id as {"app": {"artifactId": "..."}}.',
+    description: 'Builds uploaded to this harness -- simulator .app bundles and Android .apks -- newest first. Reference one by its id as {"app": {"artifactId": "..."}}.',
     inputSchema: {},
   }, async () => json(await client.listArtifacts()));
   
   server.registerTool('inspect_simulator', {
-    title: 'Inspect a simulator screen',
-    description: 'Live accessibility tree of a pooled simulator: every element with its type, label, identifier and tap coordinates. Use this to author exact `steps` for a deterministic run.',
+    title: 'Inspect a device screen',
+    description: 'Live accessibility tree of a pooled simulator or emulator: every element with its type, label, identifier and tap coordinates. Use this to author exact `steps` for a deterministic run.',
     inputSchema: { device: z.string().describe('Pool device name (e.g. "simcheck-01") or its UDID.') },
   }, async ({ device }) => json(await client.inspect(device)));
 

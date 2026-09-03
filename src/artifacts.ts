@@ -5,6 +5,7 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { spawnSync } from 'node:child_process';
 import type { Config } from './config.js';
+import type { PlatformId } from './device.js';
 import { paths } from './config.js';
 import { execOk, nowIso, HttpError } from './util.js';
 import { logger } from './log.js';
@@ -13,6 +14,9 @@ const log = logger('artifacts');
 
 export interface Artifact {
   id: string;              // content-addressed: the sha256 of the upload
+  /** Which platform this build installs on, decided at upload time. */
+  platform: PlatformId;
+  /** Bundle id on iOS, package name on Android. */
   bundleId: string;
   appName: string;
   bytes: number;
@@ -140,7 +144,7 @@ export class ArtifactStore {
       }
 
       const artifact: Artifact = {
-        id, bundleId, appPath,
+        id, platform: 'ios', bundleId, appPath,
         appName: path.basename(appPath),
         bytes,
         uploadedAt: nowIso(),

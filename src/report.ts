@@ -3,6 +3,13 @@ import path from 'node:path';
 import type { Run } from './types.js';
 import { describeStep } from './steps.js';
 
+const MODE_LABEL: Record<string, string> = {
+  scenario: 'natural language',
+  steps: 'explicit steps',
+  xctest: 'XCUITest',
+  instrumentation: 'Android instrumentation',
+};
+
 const VERDICT_BADGE: Record<string, string> = {
   passed: 'PASSED', failed: 'FAILED', error: 'HARNESS ERROR',
   timeout: 'TIMED OUT', cancelled: 'CANCELLED',
@@ -28,9 +35,9 @@ export function writeReport(run: Run, runDir: string): string {
   L.push('|---|---|');
   L.push(`| Run | \`${run.id}\` |`);
   L.push(`| Status | **${run.status}** |`);
-  L.push(`| Mode | ${run.mode === 'scenario' ? 'natural language' : run.mode === 'xctest' ? 'XCUITest' : 'explicit steps'} |`);
+  L.push(`| Mode | ${MODE_LABEL[run.mode] ?? run.mode} |`);
   if (run.device) L.push(`| Device | ${run.device.name} - ${run.device.runtime} |`);
-  if (run.bundleId) L.push(`| Bundle | \`${run.bundleId}\` |`);
+  if (run.bundleId) L.push(`| ${run.device?.platform === 'android' ? 'Package' : 'Bundle'} | \`${run.bundleId}\` |`);
   L.push(`| Duration | ${dur} |`);
   if (run.actionsUsed !== undefined) L.push(`| Actions | ${run.actionsUsed} |`);
   L.push('');

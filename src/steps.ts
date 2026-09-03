@@ -2,9 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Step } from './types.js';
 import type { Store } from './store.js';
-import { Axe, renderScreen, type Screen } from './axe.js';
-import { Baguette } from './baguette.js';
-import * as simctl from './simctl.js';
+import type { DeviceBackend, LaunchTarget, TouchDriver, UiDriver } from './device.js';
+import { renderScreen, type Screen } from './screen.js';
 import { sleep, slug, nowIso } from './util.js';
 import { logger } from './log.js';
 
@@ -13,12 +12,22 @@ const log = logger('steps');
 export interface ExecutorContext {
   runId: string;
   udid: string;
-  bundleId: string;
+  /** What to launch, and what to call it in the log stream. */
+  app: LaunchTarget;
   runDir: string;
   launchArgs: string[];
   launchEnv: Record<string, string>;
   signal: AbortSignal;
 }
+
+/** Told to the caller when a multi-touch step has no driver behind it. */
+export const noTouchDriver = (platform: string): string =>
+  platform === 'ios'
+    ? 'multi-touch needs the "baguette" CLI, which is not on PATH. Install it with: brew install baguette' +
+      ' (Apple Silicon, Xcode 26+). AXe drives a single contact only, so pinch and two-finger pan are not possible without it.'
+    : `multi-touch is not available on ${platform}. \`adb shell input\` drives one pointer only, so pinch, ` +
+      'two-finger pan and a real double tap cannot be expressed through it. Assert the gesture from inside ' +
+      'the app with an instrumentation test instead, which has genuine multi-touch.';
 
 /**
  * Executes one `Step` against a leased simulator, recording it into the run so
@@ -28,17 +37,18 @@ export class StepExecutor {
   private lastScreen: Screen | null = null;
 
   constructor(
-    private axe: Axe,
+    private ui: UiDriver,
+    private devices: DeviceBackend,
     private store: Store,
     private ctx: ExecutorContext,
     /** Required, though it may be undefined: an optional parameter let a
      *  missing argument compile, and the driver silently never arrived. */
-    private touch: Baguette | undefined,
+    private touch: TouchDriver | undefined,
   ) {}
 
   /** Multi-touch driver, or a clear explanation of why it is unavailable. */
-  private requireTouch(): Baguette {
-    if (!this.touch) throw new Error(Baguette.missingMessage('baguette'));
+  private requireTouch(): TouchDriver {
+    if (!this.touch) throw new Error(noTouchDriver(this.devices.platform));
     return this.touch;
   }
 
@@ -52,7 +62,7 @@ export class StepExecutor {
   get screen(): Screen | null { return this.lastScreen; }
 
   async refresh(): Promise<Screen> {
-    this.lastScreen = await this.axe.describe(this.ctx.signal);
+    this.lastScreen = await this.ui.describe(this.ctx.signal);
     return this.lastScreen;
   }
 
@@ -80,57 +90,57 @@ export class StepExecutor {
   /** Returns a description of what was actually driven, where that differs
    *  from what was asked for. Anything else traces as the step itself. */
   private async dispatch(step: Step): Promise<string | void> {
-    const { udid, bundleId, signal } = this.ctx;
+    const { udid, app, signal } = this.ctx;
     switch (step.action) {
       case 'launch':
-        await simctl.launch(udid, bundleId, step.args ?? this.ctx.launchArgs, step.env ?? this.ctx.launchEnv);
+        await this.devices.launch(udid, app, step.args ?? this.ctx.launchArgs, step.env ?? this.ctx.launchEnv);
         await sleep(1200, signal);
         return;
 
       case 'relaunch':
-        await simctl.terminate(udid, bundleId);
+        await this.devices.terminate(udid, app.appId);
         await sleep(400, signal);
-        await simctl.launch(udid, bundleId, this.ctx.launchArgs, this.ctx.launchEnv);
+        await this.devices.launch(udid, app, this.ctx.launchArgs, this.ctx.launchEnv);
         await sleep(1200, signal);
         return;
 
       case 'terminate':
-        await simctl.terminate(udid, bundleId);
+        await this.devices.terminate(udid, app.appId);
         return;
 
       case 'tap':
-        await this.axe.tap(step, signal);
+        await this.ui.tap(step, signal);
         await sleep(600, signal);            // let the transition settle
         return;
 
       case 'type':
-        await this.axe.type(step.text, signal);
+        await this.ui.type(step.text, signal);
         await sleep(300, signal);
         return;
 
       case 'clear_text':
-        await this.axe.clearText(signal);
+        await this.ui.clearText(signal);
         return;
 
       case 'press_enter':
-        await this.axe.pressEnter(signal);
+        await this.ui.pressEnter(signal);
         await sleep(600, signal);
         return;
 
       case 'swipe':
-        await this.axe.swipe(step, signal);
+        await this.ui.swipe(step, signal);
         await sleep(500, signal);
         return;
 
       case 'gesture': {
         const screen = this.lastScreen ?? await this.refresh();
-        await this.axe.gesture(step.preset, screen, step.durationMs, signal);
+        await this.ui.gesture(step.preset, screen, step.durationMs, signal);
         await sleep(500, signal);
         return;
       }
 
       case 'button':
-        await this.axe.button(step.button, step.durationMs, signal);
+        await this.ui.button(step.button, step.durationMs, signal);
         await sleep(800, signal);
         return;
 
@@ -201,7 +211,7 @@ export class StepExecutor {
         return;
 
       case 'wait_for': {
-        const found = await this.axe.waitFor(step, step.timeoutMs ?? 10_000, signal);
+        const found = await this.ui.waitFor(step, step.timeoutMs ?? 10_000, signal);
         if (!found) throw new Error(`timed out waiting for ${step.id ?? step.label}`);
         return;
       }
@@ -211,17 +221,17 @@ export class StepExecutor {
         return;
 
       case 'open_url':
-        await simctl.openUrl(udid, step.url);
+        await this.devices.openUrl(udid, step.url);
         await sleep(1500, signal);
         return;
 
       case 'appearance':
-        await simctl.setAppearance(udid, step.mode);
+        await this.devices.setAppearance(udid, step.mode);
         await sleep(800, signal);
         return;
 
       case 'permission':
-        await simctl.setPrivacy(udid, step.grant, step.service, bundleId);
+        await this.devices.setPermission(udid, step.grant, step.service, app.appId);
         return;
 
       case 'describe_ui': {
@@ -254,10 +264,10 @@ export class StepExecutor {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
 
     try {
-      await this.axe.screenshot(abs, this.ctx.signal);
+      await this.ui.screenshot(abs, this.ctx.signal);
     } catch (e) {
-      log.warn(`axe screenshot failed, falling back to simctl`, (e as Error).message);
-      await simctl.screenshot(this.ctx.udid, abs);
+      log.warn('driver screenshot failed, falling back to the device backend', (e as Error).message);
+      await this.devices.screenshot(this.ctx.udid, abs);
     }
     if (!fs.existsSync(abs)) throw new Error(`screenshot "${name}" produced no file`);
 

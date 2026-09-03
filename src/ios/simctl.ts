@@ -1,5 +1,5 @@
-import { exec, execOk } from './util.js';
-import { logger } from './log.js';
+import { exec, execOk } from '../util.js';
+import { logger } from '../log.js';
 
 const log = logger('simctl');
 

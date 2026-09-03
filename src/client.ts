@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import type { Config } from './config.js';
 import { baseUrl, readToken } from './config.js';
 import type { PooledDevice, Run, RunRequest } from './types.js';
+import type { PlatformId } from './device.js';
 
 export interface RunView extends Run {
   done: boolean;
@@ -19,7 +20,7 @@ export interface PoolView {
 }
 
 export interface Artifact {
-  id: string; bundleId: string; appName: string; bytes: number;
+  id: string; platform: PlatformId; bundleId: string; appName: string; bytes: number;
   uploadedAt: string; uploadedBy: string; label?: string; gitSha?: string;
 }
 
@@ -70,7 +71,7 @@ export class Client {
     return (text ? JSON.parse(text) : {}) as T;
   }
 
-  health(): Promise<{ ok: boolean; llm: string | null; pool: number }> {
+  health(): Promise<{ ok: boolean; llm: string | null; pool: number; platforms?: PlatformId[] }> {
     return this.call('GET', '/health');
   }
 
@@ -167,7 +168,7 @@ export class Client {
     return this.call('GET', '/v1/pool');
   }
 
-  addDevices(spec: { deviceType?: string; runtime?: string; count?: number }): Promise<{ added: PooledDevice[]; pool: PoolView }> {
+  addDevices(spec: { platform?: PlatformId; deviceType?: string; runtime?: string; count?: number }): Promise<{ added: PooledDevice[]; pool: PoolView }> {
     return this.call('POST', '/v1/pool/devices', spec, 180_000);
   }
 

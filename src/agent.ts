@@ -4,7 +4,7 @@ import { JSON_REPLY_CONTRACT } from './llm.js';
 import type { Run, Step } from './types.js';
 import type { Store } from './store.js';
 import type { StepExecutor } from './steps.js';
-import { renderScreen } from './axe.js';
+import { renderScreen } from './screen.js';
 import { describeStep } from './steps.js';
 import { logger } from './log.js';
 
@@ -18,7 +18,7 @@ export interface AgentResult {
   exhausted: boolean;
 }
 
-const SYSTEM = `You are driving a real iOS Simulator to carry out a test scenario on behalf of another engineer.
+const SYSTEM = `You are driving a real mobile device -- an iOS Simulator or an Android emulator -- to carry out a test scenario on behalf of another engineer.
 
 You act through a small set of actions. After each batch you get the fresh accessibility tree of whatever is now on screen, so work in small steps and check the result rather than guessing several screens ahead.
 

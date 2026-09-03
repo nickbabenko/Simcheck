@@ -1,5 +1,9 @@
-import { exec, execOk, sleep } from './util.js';
-import type { GesturePreset, HardwareButton } from './types.js';
+import { exec, execOk, sleep } from '../util.js';
+import type { GesturePreset, HardwareButton } from '../types.js';
+import { IOS_BUTTONS } from '../types.js';
+import type { SwipeSpec, TapSelector, UiDriver } from '../device.js';
+import type { Screen, UiElement } from '../screen.js';
+import { ALWAYS_KEEP, NOISE_TYPES, clean, finishScreen } from '../screen.js';
 
 /** One node of AXe's `describe-ui` output, trimmed to what we use. */
 interface AxNodeRaw {
@@ -16,39 +20,10 @@ interface AxNodeRaw {
   children?: AxNodeRaw[];
 }
 
-export interface AxElement {
-  type: string;
-  label?: string;
-  id?: string;
-  value?: string;
-  enabled: boolean;
-  center: { x: number; y: number };
-  frame: { x: number; y: number; width: number; height: number };
-  depth: number;
-}
-
-export interface Screen {
-  width: number;
-  height: number;
-  elements: AxElement[];
-  /** Elements dropped by the cap, so the model knows the view is partial. */
-  truncated: number;
-}
-
 /** Failures that mean "the simulator was not ready", not "the app is wrong". */
 const TRANSIENT = /creating the simulator remote automation session|Failed to connect to the simulator|Lost connection to the simulator|device is booting/i;
 
-/** Container roles carry no interaction affordance and would swamp the model. */
-const NOISE_TYPES = new Set(['Application', 'Window', 'Group', 'Other', 'Unknown', 'ScrollView']);
-
-/** Types worth surfacing even with no label -- the model can still tap them. */
-const ALWAYS_KEEP = new Set([
-  'Button', 'TextField', 'SecureTextField', 'SearchField', 'Switch', 'Slider',
-  'Link', 'Cell', 'TabBar', 'MenuItem', 'Picker', 'PickerWheel', 'Stepper',
-  'SegmentedControl', 'CheckBox', 'RadioButton', 'TextView',
-]);
-
-export class Axe {
+export class Axe implements UiDriver {
   constructor(private bin: string, private udid: string) {}
 
   /**
@@ -88,9 +63,7 @@ export class Axe {
     }
 
     const root = tree[0]?.frame;
-    const width = root?.width ?? 0;
-    const height = root?.height ?? 0;
-    const collected: AxElement[] = [];
+    const collected: UiElement[] = [];
 
     const visit = (node: AxNodeRaw, depth: number): void => {
       const type = (node.type || node.role_description || node.role || 'Unknown').replace(/^AX/, '');
@@ -119,17 +92,14 @@ export class Axe {
     };
     for (const node of tree) visit(node, 0);
 
-    // Reading order: top to bottom, then left to right.
-    collected.sort((a, b) => a.frame.y - b.frame.y || a.frame.x - b.frame.x);
-    const truncated = Math.max(0, collected.length - cap);
-    return { width, height, elements: collected.slice(0, cap), truncated };
+    return finishScreen(collected, root?.width ?? 0, root?.height ?? 0, cap);
   }
 
   async screenshot(outPath: string, signal?: AbortSignal): Promise<void> {
     await this.run(['screenshot', '--output', outPath], { signal, timeoutMs: 60_000 });
   }
 
-  async tap(sel: { id?: string; label?: string; value?: string; elementType?: string; x?: number; y?: number; waitTimeoutMs?: number }, signal?: AbortSignal): Promise<void> {
+  async tap(sel: TapSelector, signal?: AbortSignal): Promise<void> {
     const args = ['tap'];
     if (sel.x !== undefined && sel.y !== undefined) {
       args.push('-x', String(Math.round(sel.x)), '-y', String(Math.round(sel.y)));
@@ -159,7 +129,7 @@ export class Axe {
     await this.run(['key', '40'], { signal });
   }
 
-  async swipe(a: { startX: number; startY: number; endX: number; endY: number; durationMs?: number }, signal?: AbortSignal): Promise<void> {
+  async swipe(a: SwipeSpec, signal?: AbortSignal): Promise<void> {
     const args = ['swipe',
       '--start-x', String(Math.round(a.startX)), '--start-y', String(Math.round(a.startY)),
       '--end-x', String(Math.round(a.endX)), '--end-y', String(Math.round(a.endY))];
@@ -175,6 +145,10 @@ export class Axe {
   }
 
   async button(button: HardwareButton, durationMs?: number, signal?: AbortSignal): Promise<void> {
+    if (!IOS_BUTTONS.includes(button)) {
+      throw new Error(
+        `"${button}" is not a button an iOS device has. iOS accepts: ${IOS_BUTTONS.join(', ')}.`);
+    }
     const args = ['button', button];
     if (durationMs) args.push('--duration', String(durationMs / 1000));
     await this.run(args, { signal });
@@ -197,27 +171,4 @@ export class Axe {
     const r = await exec(bin, ['--version'], { timeoutMs: 15_000 });
     return r.code === 0 ? r.stdout.trim() : null;
   }
-}
-
-const clean = (s: string | null | undefined): string | undefined => {
-  if (typeof s !== 'string') return undefined;
-  const t = s.replace(/\s+/g, ' ').trim();
-  return t && t !== '-' ? t.slice(0, 200) : undefined;
-};
-
-/** Compact text rendering of a screen for the model prompt. */
-export function renderScreen(screen: Screen): string {
-  if (!screen.elements.length) return '(no accessible elements on screen)';
-  const lines = screen.elements.map((e) => {
-    const bits = [`[${e.type}]`];
-    if (e.label) bits.push(JSON.stringify(e.label));
-    if (e.id) bits.push(`id=${JSON.stringify(e.id)}`);
-    if (e.value !== undefined) bits.push(`value=${JSON.stringify(e.value)}`);
-    if (!e.enabled) bits.push('(disabled)');
-    bits.push(`@${e.center.x},${e.center.y}`);
-    return '  ' + bits.join(' ');
-  });
-  const head = `screen ${screen.width}x${screen.height} pt, ${screen.elements.length} elements`;
-  const tail = screen.truncated ? `\n  ... ${screen.truncated} more elements hidden (scroll to reach them)` : '';
-  return `${head}\n${lines.join('\n')}${tail}`;
 }

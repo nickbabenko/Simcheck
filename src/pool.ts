@@ -1,25 +1,35 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from './config.js';
-import { paths } from './config.js';
+import { paths, platformDefaults } from './config.js';
 import type { DeviceRequest, PooledDevice } from './types.js';
+import type { ExistingDevice, PlatformId } from './device.js';
+import type { Platforms } from './platforms.js';
 import { statfsSync } from 'node:fs';
-import * as simctl from './simctl.js';
-import { Axe } from './axe.js';
 import { logger } from './log.js';
 import { nowIso, sleep } from './util.js';
 
 const log = logger('pool');
 
+/** The pool's desired shape, as a list of specs. */
+interface PoolSpec {
+  platform: PlatformId;
+  deviceType: string;
+  runtime: string;
+  count: number;
+}
+
 /**
- * Keeps a set of simulators pre-booted and hands them out one run at a time.
+ * Keeps a set of pre-booted devices -- iOS simulators, Android emulators, or
+ * both -- and hands them out one run at a time.
  *
  * Devices enter as `pending` -- either because the pool is filling to its
  * target size or because someone added one explicitly -- and stay pending
  * until the reconcile loop picks them up and boots them to `ready`.
  *
- * Safety: the pool only ever boots, erases or deletes simulators whose name
- * starts with `cfg.devicePrefix`. Simulators you use in Xcode are untouched.
+ * Safety: the pool only ever boots, erases or deletes devices whose name
+ * starts with `cfg.devicePrefix`. Simulators and AVDs you use by hand are
+ * untouched.
  */
 export class Pool {
   private devices = new Map<string, PooledDevice>();
@@ -27,7 +37,7 @@ export class Pool {
   private timer?: NodeJS.Timeout;
   private stopped = false;
 
-  constructor(private cfg: Config) {}
+  constructor(private cfg: Config, private platforms: Platforms) {}
 
   async start(): Promise<void> {
     this.load();
@@ -52,11 +62,9 @@ export class Pool {
   private matches(d: PooledDevice, req?: DeviceRequest): boolean {
     if (!req) return true;
     if (req.udid && d.udid !== req.udid) return false;
+    if (req.platform && d.platform !== req.platform) return false;
     if (req.name && d.deviceType.toLowerCase() !== req.name.toLowerCase()) return false;
-    if (req.runtime) {
-      const want = req.runtime.toLowerCase().replace(/^ios\s*/, '');
-      if (!d.runtime.toLowerCase().replace(/^ios\s*/, '').startsWith(want)) return false;
-    }
+    if (req.runtime && !runtimeMatches(d.runtime, req.runtime)) return false;
     return true;
   }
 
@@ -68,14 +76,14 @@ export class Pool {
   private provisioning = new Set<string>();
 
   private static key(req?: DeviceRequest): string {
-    return `${req?.name ?? '*'}::${req?.runtime ?? '*'}`;
+    return `${req?.platform ?? '*'}::${req?.name ?? '*'}::${req?.runtime ?? '*'}`;
   }
 
   atCapacity(): boolean {
     return this.list().filter((d) => d.status !== 'offline').length >= this.cfg.maxPoolDevices;
   }
 
-  /** Free space on the volume holding the simulators, in GB. */
+  /** Free space on the volume holding the devices, in GB. */
   private freeDiskGb(): number {
     try {
       const st = statfsSync(this.cfg.home);
@@ -86,26 +94,21 @@ export class Pool {
   }
 
   /**
-   * Would creating another simulator take free space below the floor?
+   * Would creating another device take free space below the floor?
    *
    * The check has to subtract what the new device will cost, not just look at
    * what is free now -- otherwise a floor of 6GB still permits a create at
-   * 6.5GB free, and a ~3.5GB device lands you at 3GB.
+   * 6.5GB free, and a ~3.5GB device lands you at 3GB. What one costs is the
+   * platform's business: an emulator system image is far larger than a
+   * simulator's shared runtime.
    */
-  /**
-   * Measured, not guessed: creating and first-booting a device on a fresh
-   * runtime consumed ~8GB, far more than the ~3GB a settled device reports as
-   * `dataPathSize`. Most of it is transient and APFS reclaims it lazily, but
-   * the peak is what matters when deciding whether there is room.
-   */
-  private static readonly DEVICE_COST_GB = 8;
-
-  private diskTooTight(): string | null {
+  private diskTooTight(platform: PlatformId): string | null {
+    const backend = this.platforms.get(platform).devices;
     const free = this.freeDiskGb();
-    const after = free - Pool.DEVICE_COST_GB;
+    const after = free - backend.diskCostGb;
     if (after >= this.cfg.minFreeDiskGb) return null;
-    return `${free.toFixed(1)}GB free; a booted simulator needs about ` +
-      `${Pool.DEVICE_COST_GB}GB, which would leave ${Math.max(0, after).toFixed(1)}GB ` +
+    return `${free.toFixed(1)}GB free; a booted ${backend.deviceNoun} needs about ` +
+      `${backend.diskCostGb}GB, which would leave ${Math.max(0, after).toFixed(1)}GB ` +
       `— below the ${this.cfg.minFreeDiskGb}GB floor. Free some space, lower minFreeDiskGb, ` +
       `or remove a pooled device with sim_pool_remove.`;
   }
@@ -114,7 +117,7 @@ export class Pool {
    * Create a device for a request the pool cannot currently serve.
    *
    * Returns a note explaining what is happening, or null if it will not do it.
-   * Pinning to a specific UDID is never provisionable -- that device either
+   * Pinning to a specific id is never provisionable -- that device either
    * exists or it does not.
    */
   async provisionFor(req: DeviceRequest | undefined): Promise<string | null> {
@@ -125,7 +128,12 @@ export class Pool {
       log.warn(`not provisioning ${key}: at maxPoolDevices (${this.cfg.maxPoolDevices})`);
       return null;
     }
-    const tight = this.diskTooTight();
+    const platform = req?.platform ?? this.platforms.default();
+    if (!this.platforms.has(platform)) {
+      log.warn(`not provisioning ${key}: ${this.platforms.reason(platform)}`);
+      return null;
+    }
+    const tight = this.diskTooTight(platform);
     if (tight) {
       log.warn(`not provisioning ${key}: ${tight}`);
       return null;
@@ -134,13 +142,15 @@ export class Pool {
     this.provisioning.add(key);
     try {
       const created = await this.add({
+        platform,
         ...(req?.name ? { deviceType: req.name } : {}),
         ...(req?.runtime ? { runtime: req.runtime } : {}),
         count: 1,
       });
       const d = created[0]!;
+      const noun = this.platforms.get(platform).devices.deviceNoun;
       log.info(`provisioned ${d.name} (${d.deviceType} / ${d.runtime}) on demand`);
-      return `no warm ${d.deviceType} on ${d.runtime} was pooled, so one is being created and booted -- this run will start slower than usual`;
+      return `no warm ${d.deviceType} on ${d.runtime} was pooled, so a ${noun} is being created and booted -- this run will start slower than usual`;
     } catch (e) {
       log.error(`could not provision for ${key}`, (e as Error).message);
       return null;
@@ -171,24 +181,25 @@ export class Pool {
   }): Promise<void> {
     const d = this.devices.get(udid);
     if (!d) return;
+    const backend = this.platforms.get(d.platform).devices;
     d.status = 'recycling';
     delete d.currentRunId;
     this.save();
     try {
       if (opts.policy === 'erase') {
-        await simctl.shutdown(udid);
-        await simctl.erase(udid);
-        await simctl.boot(udid);
+        await backend.shutdown(udid);
+        await backend.erase(udid);
+        await backend.boot(udid);
       } else if (opts.bundleId) {
-        await simctl.terminate(udid, opts.bundleId);
+        await backend.terminate(udid, opts.bundleId);
         if (opts.uninstall) {
-          await simctl.uninstall(udid, opts.bundleId);
-          await simctl.resetPrivacy(udid, opts.bundleId);
+          await backend.uninstall(udid, opts.bundleId);
+          await backend.resetPermissions(udid, opts.bundleId);
         }
       }
       // Uninstalling an app does not dismiss a system alert it left on screen
-      // -- that sheet belongs to SpringBoard and would greet the next run.
-      if (opts.policy !== 'erase') await this.sanitize(udid, d.name);
+      // -- that sheet belongs to the OS shell and would greet the next run.
+      if (opts.policy !== 'erase') await this.sanitize(d);
       d.status = 'ready';
       d.readyAt = nowIso();
       delete d.lastError;
@@ -208,24 +219,26 @@ export class Pool {
    * that is still dirty after that is marked offline rather than handed out,
    * because a leftover sheet silently breaks the next run's taps.
    */
-  private async sanitize(udid: string, name: string): Promise<void> {
-    const axe = new Axe(this.cfg.axeBin, udid);
+  private async sanitize(d: PooledDevice): Promise<void> {
+    const platform = this.platforms.get(d.platform);
+    const ui = platform.ui(d.udid);
+    const name = d.name;
 
     const strayModal = async (): Promise<string | null> => {
-      const screen = await axe.describe().catch(() => null);
+      const screen = await ui.describe().catch(() => null);
       if (!screen) return null;   // cannot read it; do not block recycling on that
       const modal = screen.elements.find((e) => e.type === 'Sheet' || e.type === 'Alert');
       return modal ? (modal.label ?? modal.type) : null;
     };
 
-    await axe.button('home').catch(() => {});
+    await ui.button('home').catch(() => {});
     await sleep(400);
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const modal = await strayModal();
       if (!modal) return;
 
-      const screen = await axe.describe().catch(() => null);
+      const screen = await ui.describe().catch(() => null);
       const buttons = (screen?.elements ?? []).filter((e) => e.type === 'Button' && e.label);
       // Prefer the declining option -- never silently grant a permission.
       const choice = DISMISS_LABELS
@@ -234,44 +247,53 @@ export class Pool {
       if (!choice) break;
 
       log.info(`${name}: dismissing leftover modal "${modal}" via "${choice.label}"`);
-      await axe.tap({ label: choice.label! }).catch(() => {});
+      await ui.tap({ label: choice.label! }).catch(() => {});
       await sleep(800);
     }
 
     if (!(await strayModal())) return;
 
     log.warn(`${name}: modal survived dismissal, rebooting the device`);
-    await simctl.shutdown(udid);
-    await simctl.boot(udid);
+    await platform.devices.shutdown(d.udid);
+    await platform.devices.boot(d.udid);
     await sleep(1500);
 
     const remaining = await strayModal();
     if (remaining) throw new Error(`device still shows "${remaining}" after a reboot`);
   }
 
-  /** Register an extra simulator. It lands as `pending` and the reconcile loop
-   *  boots it. `deviceType` defaults to the pool's configured type. */
-  async add(spec: { deviceType?: string; runtime?: string; count?: number } = {}): Promise<PooledDevice[]> {
+  /** Register an extra device. It lands as `pending` and the reconcile loop
+   *  boots it. `deviceType` defaults to the pool's type for that platform. */
+  async add(spec: {
+    platform?: PlatformId; deviceType?: string; runtime?: string; count?: number;
+  } = {}): Promise<PooledDevice[]> {
+    const platform = spec.platform ?? this.platforms.default();
+    const backend = this.platforms.get(platform).devices;
     const count = Math.max(1, spec.count ?? 1);
-    const tight = this.diskTooTight();
-    if (tight) throw new Error(`refusing to create a simulator: ${tight}`);
-    const runtime = await simctl.resolveRuntime(spec.runtime ?? this.cfg.runtime);
-    const deviceType = await simctl.resolveDeviceType(spec.deviceType ?? this.cfg.deviceType, runtime);
+    const tight = this.diskTooTight(platform);
+    if (tight) throw new Error(`refusing to create a ${backend.deviceNoun}: ${tight}`);
+
+    const fallback = platformDefaults(this.cfg, platform);
+    const target = await backend.resolveTarget(
+      spec.deviceType ?? fallback.deviceType,
+      spec.runtime ?? fallback.runtime,
+    );
+
     const created: PooledDevice[] = [];
     for (let i = 0; i < count; i++) {
       const name = this.nextName();
-      const udid = await simctl.create(name, deviceType.identifier, runtime.identifier);
+      const id = await backend.create(name, target);
       const d: PooledDevice = {
-        udid, name,
-        deviceType: deviceType.name,
-        runtime: runtime.name || `iOS ${runtime.version}`,
+        udid: id, platform, name,
+        deviceType: target.deviceType,
+        runtime: target.runtime,
         status: 'pending',
         addedAt: nowIso(),
         managed: true,
       };
-      this.devices.set(udid, d);
+      this.devices.set(id, d);
       created.push(d);
-      log.info(`added ${name} (${deviceType.name} / ${d.runtime}) -- pending`);
+      log.info(`added ${name} (${target.deviceType} / ${target.runtime}) -- pending`);
     }
     this.save();
     void this.reconcile();
@@ -287,42 +309,65 @@ export class Pool {
     }
     this.devices.delete(udid);
     this.save();
-    if (d.managed) {
-      await simctl.shutdown(udid).catch(() => {});
-      await simctl.deleteDevice(udid).catch((e) => log.warn(`delete ${d.name} failed`, String(e)));
+    if (d.managed && this.platforms.has(d.platform)) {
+      const backend = this.platforms.get(d.platform).devices;
+      await backend.shutdown(udid).catch(() => {});
+      await backend.destroy(udid).catch((e) => log.warn(`delete ${d.name} failed`, String(e)));
     }
     log.info(`removed ${d.name}`);
   }
 
   /* ---------------------------------------------------------------- internals */
 
-  /** Re-attach to simulators we created in a previous daemon lifetime, and drop
+  /** Every device on this machine, across every usable platform. */
+  private async survey(): Promise<Map<string, { platform: PlatformId; d: ExistingDevice }>> {
+    const live = new Map<string, { platform: PlatformId; d: ExistingDevice }>();
+    for (const platform of this.platforms.available()) {
+      try {
+        for (const d of await this.platforms.get(platform).devices.list()) {
+          live.set(d.id, { platform, d });
+        }
+      } catch (e) {
+        log.warn(`could not list ${platform} devices`, (e as Error).message);
+      }
+    }
+    return live;
+  }
+
+  /** Re-attach to devices we created in a previous daemon lifetime, and drop
    *  records for ones that have since been deleted out from under us. */
   private async adopt(): Promise<void> {
-    const live = new Map((await simctl.listDevices()).map((d) => [d.udid, d]));
+    const live = await this.survey();
 
     for (const [udid, d] of this.devices) {
       const actual = live.get(udid);
-      if (!actual || !actual.isAvailable) {
+      if (!actual || !actual.d.available) {
+        // A platform that failed preflight lists nothing; that is not evidence
+        // its devices are gone, so keep the record and let it go offline.
+        if (!this.platforms.has(d.platform)) {
+          d.status = 'offline';
+          d.lastError = this.platforms.reason(d.platform);
+          continue;
+        }
         log.warn(`pooled device ${d.name} no longer exists, dropping`);
         this.devices.delete(udid);
         continue;
       }
       // A lease cannot survive a restart -- the run that held it is gone.
-      d.status = actual.state === 'Booted' ? 'ready' : 'pending';
+      d.status = actual.d.booted ? 'ready' : 'pending';
       delete d.currentRunId;
     }
 
     // Pick up strays from a crashed run: our prefix, ours to manage.
-    for (const [udid, d] of live) {
-      if (this.devices.has(udid) || !d.isAvailable) continue;
+    for (const [udid, { platform, d }] of live) {
+      if (this.devices.has(udid) || !d.available) continue;
       if (!d.name.startsWith(this.cfg.devicePrefix + '-')) continue;
       this.devices.set(udid, {
-        udid,
+        udid, platform,
         name: d.name,
-        deviceType: d.deviceTypeIdentifier.split('.').pop()!.replace(/-/g, ' '),
-        runtime: runtimeLabel(d.runtimeIdentifier),
-        status: d.state === 'Booted' ? 'ready' : 'pending',
+        deviceType: d.deviceType,
+        runtime: d.runtime,
+        status: d.booted ? 'ready' : 'pending',
         addedAt: nowIso(),
         managed: true,
       });
@@ -338,24 +383,35 @@ export class Pool {
     return this.desired().reduce((n, spec) => n + spec.count, 0);
   }
 
-  /** The pool's desired shape, as a list of specs. */
-  private desired(): { deviceType: string; runtime: string; count: number }[] {
-    if (this.cfg.pool.length) {
-      return this.cfg.pool.map((p) => ({
-        deviceType: p.deviceType ?? this.cfg.deviceType,
-        runtime: p.runtime ?? this.cfg.runtime,
-        count: Math.max(0, p.count ?? 1),
-      }));
-    }
-    return [{ deviceType: this.cfg.deviceType, runtime: this.cfg.runtime, count: this.cfg.poolSize }];
+  /** The pool's desired shape. Specs naming an unavailable platform are
+   *  dropped: the pool cannot fill them, and pretending otherwise makes
+   *  `targetCount` a number it will never reach. */
+  private desired(): PoolSpec[] {
+    const specs: PoolSpec[] = this.cfg.pool.length
+      ? this.cfg.pool.map((p) => {
+          const platform = p.platform ?? this.cfg.defaultPlatform;
+          const fallback = platformDefaults(this.cfg, platform);
+          return {
+            platform,
+            deviceType: p.deviceType ?? fallback.deviceType,
+            runtime: p.runtime ?? fallback.runtime,
+            count: Math.max(0, p.count ?? 1),
+          };
+        })
+      : [{
+          platform: this.cfg.defaultPlatform,
+          ...platformDefaults(this.cfg, this.cfg.defaultPlatform),
+          count: this.cfg.poolSize,
+        }];
+    return specs.filter((s) => this.platforms.has(s.platform));
   }
 
-  /** Does this device satisfy that spec? Runtime compared loosely (26.3 ~ iOS 26.3). */
-  private satisfies(d: PooledDevice, spec: { deviceType: string; runtime: string }): boolean {
+  /** Does this device satisfy that spec? Runtime compared loosely. */
+  private satisfies(d: PooledDevice, spec: PoolSpec): boolean {
+    if (d.platform !== spec.platform) return false;
     if (d.deviceType.toLowerCase() !== spec.deviceType.toLowerCase()) return false;
     if (!spec.runtime) return true;
-    const want = spec.runtime.toLowerCase().replace(/^ios\s*/, '');
-    return d.runtime.toLowerCase().replace(/^ios\s*/, '').startsWith(want);
+    return runtimeMatches(d.runtime, spec.runtime);
   }
 
   /** Fill to the target size and boot anything still pending. */
@@ -364,8 +420,9 @@ export class Pool {
     this.reconciling = true;
     try {
       // Detect drift before acting on our own record of the world. A device can
-      // be shut down outside the harness -- by `simctl erase`, by Xcode, or by a
-      // crash -- and trusting a stale `ready` would hand out a dead simulator.
+      // be shut down outside the harness -- by `simctl erase`, by Xcode, by
+      // `adb emu kill`, or by a crash -- and trusting a stale `ready` would
+      // hand out a dead device.
       await this.detectDrift();
 
       // Each spec is filled independently, so a shortfall on one runtime is
@@ -373,26 +430,29 @@ export class Pool {
       const alive = this.list().filter((d) => d.status !== 'offline');
       for (const spec of this.desired()) {
         const have = alive.filter((d) => this.satisfies(d, spec)).length;
-        if (have < spec.count && !this.atCapacity() && !this.diskTooTight()) {
+        if (have < spec.count && !this.atCapacity() && !this.diskTooTight(spec.platform)) {
           await this.add({
+            platform: spec.platform,
             deviceType: spec.deviceType,
             runtime: spec.runtime,
             count: spec.count - have,
-          }).catch((e) => log.error(`could not grow the pool for ${spec.deviceType}/${spec.runtime || 'newest'}`, (e as Error).message));
+          }).catch((e) => log.error(`could not grow the pool for ${spec.platform} ${spec.deviceType}/${spec.runtime || 'newest'}`, (e as Error).message));
         }
       }
       const pending = this.list().filter((d) => d.status === 'pending');
-      // Boot serially: several concurrent simulator boots thrash the machine.
+      // Boot serially: several concurrent boots thrash the machine, and an
+      // emulator is a whole VM.
       for (const d of pending) {
         if (this.stopped) break;
+        if (!this.platforms.has(d.platform)) continue;
         d.status = 'booting';
         this.save();
         try {
-          await simctl.boot(d.udid);
-          // Give SpringBoard a moment before declaring the device usable.
+          await this.platforms.get(d.platform).devices.boot(d.udid);
+          // Give the OS shell a moment before declaring the device usable.
           await sleep(1500);
           // A device adopted after a crash may still show the old run's alert.
-          await this.sanitize(d.udid, d.name);
+          await this.sanitize(d);
           d.status = 'ready';
           d.readyAt = nowIso();
           delete d.lastError;
@@ -409,19 +469,14 @@ export class Pool {
     }
   }
 
-  /** Re-sync pool state against what the simulators are actually doing. */
+  /** Re-sync pool state against what the devices are actually doing. */
   private async detectDrift(): Promise<void> {
-    let live: Map<string, string>;
-    try {
-      live = new Map((await simctl.listDevices()).map((d) => [d.udid, d.state]));
-    } catch (e) {
-      log.warn('could not read simulator states', (e as Error).message);
-      return;
-    }
+    const live = await this.survey();
     let changed = false;
     for (const d of this.list()) {
-      const state = live.get(d.udid);
-      if (!state) {
+      if (!this.platforms.has(d.platform)) continue;
+      const actual = live.get(d.udid);
+      if (!actual) {
         // Deleted out from under us; drop it and let the pool refill.
         log.warn(`${d.name} no longer exists, removing from the pool`);
         this.devices.delete(d.udid);
@@ -429,9 +484,9 @@ export class Pool {
         continue;
       }
       // Only correct idle devices: a leased one is mid-run and its own
-      // lifecycle owns it, and a booting one is expected to be Shutdown.
-      if (d.status === 'ready' && state !== 'Booted') {
-        log.warn(`${d.name} is ${state} but the pool thought it was ready -- rebooting`);
+      // lifecycle owns it, and a booting one is expected to be shut down.
+      if (d.status === 'ready' && !actual.d.booted) {
+        log.warn(`${d.name} is not booted but the pool thought it was ready -- rebooting`);
         d.status = 'pending';
         changed = true;
       }
@@ -452,7 +507,10 @@ export class Pool {
     const p = paths(this.cfg).pool;
     if (!fs.existsSync(p)) return;
     try {
-      for (const d of JSON.parse(fs.readFileSync(p, 'utf8')) as PooledDevice[]) this.devices.set(d.udid, d);
+      for (const d of JSON.parse(fs.readFileSync(p, 'utf8')) as PooledDevice[]) {
+        // Records written before the pool knew about platforms are iOS.
+        this.devices.set(d.udid, { ...d, platform: d.platform ?? 'ios' });
+      }
     } catch (e) {
       log.warn('pool state unreadable, starting empty', (e as Error).message);
     }
@@ -465,13 +523,23 @@ export class Pool {
   }
 }
 
+/**
+ * Loose runtime comparison, so "26.3" matches "iOS 26.3" and "35" matches
+ * "Android 15 (API 35)". Both platforms label a runtime differently from how
+ * a caller naturally asks for one.
+ */
+function runtimeMatches(have: string, want: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/^(ios|android)\s*/, '').trim();
+  const h = norm(have), w = norm(want);
+  if (h.startsWith(w)) return true;
+  // "Android 15 (API 35)" asked for as "35" or "android-35".
+  const api = have.match(/api\s*(\d+)/i)?.[1];
+  const wantApi = want.match(/(\d+)/)?.[1];
+  return Boolean(api && wantApi && api === wantApi && /api|android/i.test(want + have));
+}
+
 /** Dismissive button labels, most-preferred first. iOS uses a curly apostrophe. */
 const DISMISS_LABELS = [
-  "don't allow", '\u2019t allow', 'not now', 'no thanks', 'cancel',
-  'dismiss', 'close', 'later', 'skip', 'ok',
+  "don't allow", '’t allow', 'not now', 'no thanks', 'cancel',
+  'dismiss', 'close', 'later', 'skip', 'ok', 'deny',
 ];
-
-const runtimeLabel = (identifier: string): string => {
-  const m = identifier.match(/SimRuntime\.(\w+)-([\d-]+)$/);
-  return m ? `${m[1]} ${m[2]!.replace(/-/g, '.')}` : identifier;
-};

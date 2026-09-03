@@ -1,39 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Config } from './config.js';
-import type { XcTestSpec } from './types.js';
-import { exec } from './util.js';
-import { logger } from './log.js';
+import type { XcTestSpec } from '../types.js';
+import type {
+  NativeTestAttachment, NativeTestCase, NativeTestContext, NativeTestOutcome,
+} from '../device.js';
+import { exec } from '../util.js';
+import { logger } from '../log.js';
 
 const log = logger('xctest');
 
-export interface XcAttachment {
-  /** Path relative to the run directory. */
-  file: string;
-  /** The name the test gave it, e.g. "after-pinch". */
-  name: string;
-  /** Which test produced it. */
-  test?: string;
-  associatedWithFailure: boolean;
-}
+export const XCODEBUILD_LOG = 'xcodebuild.log';
 
-export interface XcTestCase {
-  name: string;
-  identifier: string;
-  status: string;          // Passed | Failed | Skipped | Expected Failure
-  durationSeconds?: number;
-  failure?: string;
-}
-
-export interface XcTestOutcome {
-  passed: boolean;
-  total: number;
-  failed: number;
-  skipped: number;
-  cases: XcTestCase[];
-  /** Attachments XCUITest recorded, with the names the tests gave them. */
-  attachments: XcAttachment[];
-  summary: string;
+export interface XcTestOutcome extends NativeTestOutcome {
   resultBundle: string;
 }
 
@@ -46,9 +24,8 @@ export interface XcTestOutcome {
  * belong -- the harness supplies a warm device and turns the result into the
  * same evidence report as every other run.
  */
-export async function runXcTest(
-  cfg: Config, spec: XcTestSpec, udid: string, runDir: string, signal?: AbortSignal,
-): Promise<XcTestOutcome> {
+export async function runXcTest(spec: XcTestSpec, ctx: NativeTestContext): Promise<XcTestOutcome> {
+  const { deviceId: udid, runDir, signal } = ctx;
   const resultBundle = path.join(runDir, 'TestResults.xcresult');
   fs.rmSync(resultBundle, { recursive: true, force: true });
 
@@ -81,14 +58,14 @@ export async function runXcTest(
   log.info(`xcodebuild ${args[0]} on ${udid}`);
   const started = Date.now();
   const r = await exec('xcodebuild', args, { timeoutMs: (spec.timeoutMs ?? 30 * 60_000), signal });
-  fs.writeFileSync(path.join(runDir, 'xcodebuild.log'), `$ xcodebuild ${args.join(' ')}\n\n${r.stdout}\n${r.stderr}`);
+  fs.writeFileSync(path.join(runDir, XCODEBUILD_LOG), `$ xcodebuild ${args.join(' ')}\n\n${r.stdout}\n${r.stderr}`);
   const seconds = Math.round((Date.now() - started) / 1000);
 
   if (!fs.existsSync(resultBundle)) {
     // No bundle means it never got as far as running tests.
     throw new Error(
       `xcodebuild produced no result bundle after ${seconds}s (exit ${r.code}). ` +
-      `Full log: ${path.join(runDir, 'xcodebuild.log')}\n${tailErrors(r.stdout + r.stderr)}`);
+      `Full log: ${path.join(runDir, XCODEBUILD_LOG)}\n${tailErrors(r.stdout + r.stderr)}`);
   }
 
   const outcome = await readResults(resultBundle, runDir, signal);
@@ -110,7 +87,7 @@ async function readResults(resultBundle: string, runDir: string, signal?: AbortS
     ['xcresulttool', 'get', 'test-results', 'tests', '--path', resultBundle, '--compact'],
     { timeoutMs: 120_000, signal });
 
-  const cases: XcTestCase[] = [];
+  const cases: NativeTestCase[] = [];
   try {
     // The tree nests suites arbitrarily deep; only leaves are test cases.
     const walk = (node: Record<string, any>): void => {
@@ -133,7 +110,7 @@ async function readResults(resultBundle: string, runDir: string, signal?: AbortS
   // Screenshots and other attachments XCUITest recorded, so a failure comes
   // with a picture rather than only a message.
   const attachDir = path.join(runDir, 'attachments');
-  const attachments: XcAttachment[] = [];
+  const attachments: NativeTestAttachment[] = [];
   const exported = await exec('xcrun',
     ['xcresulttool', 'export', 'attachments', '--path', resultBundle, '--output-path', attachDir],
     { timeoutMs: 300_000, signal });
@@ -193,6 +170,7 @@ async function readResults(resultBundle: string, runDir: string, signal?: AbortS
     failed: Math.max(failed, declaredFailed),
     skipped,
     cases, attachments, resultBundle,
+    logFile: XCODEBUILD_LOG,
     summary: passed
       ? `${total} test${total === 1 ? '' : 's'} passed`
       : total === 0

@@ -1,33 +1,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { Config } from './config.js';
-import { paths } from './config.js';
-import type { AppSpec } from './types.js';
+import type { Config } from '../config.js';
+import { paths } from '../config.js';
+import type { AppSpec } from '../types.js';
 import { spawnSync } from 'node:child_process';
 import * as simctl from './simctl.js';
-import type { ArtifactStore } from './artifacts.js';
-import { fetchBuild, resolveGithubArtifact } from './fetchbuild.js';
-import { exec, execOk } from './util.js';
-import { logger } from './log.js';
+import type { PrepareAppContext, PreparedApp } from '../device.js';
+import { fetchBuild, resolveGithubArtifact } from '../fetchbuild.js';
+import { exec, execOk } from '../util.js';
+import { logger } from '../log.js';
 
 const log = logger('build');
 
-export interface PreparedApp {
-  /** Absent when the app was already on the device. */
-  appPath?: string;
-  bundleId: string;
-  executable: string;
-  buildLog?: string;   // absolute path, only when we ran xcodebuild
-  /** True when we did not install it, and so must not uninstall it either. */
-  preinstalled: boolean;
-}
-
-/** Turn an AppSpec into an installable .app on disk. */
+/** Turn an AppSpec into an installable simulator .app on disk. */
 export async function prepareApp(
-  cfg: Config, spec: AppSpec, udid: string, runDir: string,
-  signal?: AbortSignal, artifacts?: ArtifactStore,
+  cfg: Config, spec: AppSpec, ctx: PrepareAppContext,
 ): Promise<PreparedApp> {
+  const { deviceId: udid, runDir, signal, artifacts } = ctx;
   // A build the daemon downloads itself, for callers that cannot upload one.
   if ((spec.url || spec.github) && !spec.artifactId) {
     if (!artifacts) throw new Error('artifact store unavailable');

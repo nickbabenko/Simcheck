@@ -6,11 +6,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { loadConfig, paths, baseUrl } from './config.js';
 import { Client, DaemonDownError, readRequestFile, type RunView } from './client.js';
 import type { RunRequest } from './types.js';
+import type { PlatformId } from './device.js';
+import { isPlatformId } from './device.js';
 
 const cfg = loadConfig();
 const client = new Client(cfg);
 
-const USAGE = `simcheck - hand off iOS simulator testing
+const USAGE = `simcheck - hand off iOS simulator and Android emulator testing
 
   simcheck start [--foreground]     start the daemon (launchd by default)
   simcheck stop                     stop the daemon
@@ -55,7 +57,8 @@ const USAGE = `simcheck - hand off iOS simulator testing
   simcheck whoami                   what the current token may do
 
   simcheck pool                     pool state
-  simcheck pool add [-n <count>] [--device "iPhone 17 Pro"] [--runtime "iOS 27.0"]
+  simcheck pool add [-n <count>] [--platform ios|android]
+       [--device "iPhone 17 Pro"] [--runtime "iOS 27.0"]
   simcheck pool remove <udid> [--force]
   simcheck inspect <device|udid>    live accessibility tree, for authoring steps
 
@@ -161,13 +164,14 @@ async function status(): Promise<void> {
   }
   const p = await client.pool();
   console.log(`daemon:  up at ${baseUrl(cfg)}`);
+  console.log(`platforms: ${health.platforms?.join(', ') || 'unknown (older daemon)'}`);
   console.log(`scenarios: ${health.llm ? `enabled via ${health.llm}` : 'DISABLED (no LLM backend; explicit steps only)'}`);
   console.log(`pool:    ${p.counts['ready'] ?? 0} ready, ${p.counts['leased'] ?? 0} busy, ${p.counts['pending'] ?? 0} pending, ${p.counts['booting'] ?? 0} booting, target ${p.target}`);
   console.log(`queue:   ${p.queued} waiting, ${p.active} running`);
   console.log('');
   for (const d of p.devices) {
     const suffix = d.currentRunId ? `  <- ${d.currentRunId}` : d.lastError ? `  (${d.lastError.slice(0, 60)})` : '';
-    console.log(`  ${d.name.padEnd(16)} ${d.status.padEnd(10)} ${d.deviceType} / ${d.runtime}${suffix}`);
+    console.log(`  ${d.name.padEnd(16)} ${(d.platform ?? 'ios').padEnd(8)} ${d.status.padEnd(10)} ${d.deviceType} / ${d.runtime}${suffix}`);
   }
 }
 
@@ -254,9 +258,17 @@ function openDir(id: string): void {
 async function pool(): Promise<void> {
   const sub = args[1];
   if (sub === 'add') {
-    const spec: { deviceType?: string; runtime?: string; count?: number } = {
+    const spec: { platform?: PlatformId; deviceType?: string; runtime?: string; count?: number } = {
       count: Number(opt('count', 'n') ?? 1),
     };
+    const platform = opt('platform');
+    if (platform) {
+      if (!isPlatformId(platform)) {
+        console.error(`unknown platform "${platform}" -- expected ios or android`);
+        process.exit(1);
+      }
+      spec.platform = platform;
+    }
     const device = opt('device'); if (device) spec.deviceType = device;
     const runtime = opt('runtime'); if (runtime) spec.runtime = runtime;
     const { added } = await client.addDevices(spec);

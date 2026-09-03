@@ -7,9 +7,10 @@ import type { Store } from './store.js';
 import { validateSteps } from './steps.js';
 import type { Runner } from './runner.js';
 import type { Scheduler } from './scheduler.js';
-import type { Run, RunRequest, Step } from './types.js';
+import type { AppSpec, Run, RunRequest, Step } from './types.js';
 import { isTerminal } from './types.js';
-import { Axe } from './axe.js';
+import type { PlatformId } from './device.js';
+import type { Platforms } from './platforms.js';
 import { HttpError, newId, nowIso } from './util.js';
 import { logger } from './log.js';
 import { TokenStore, AuthError, PRESETS, CAPABILITIES, type Identity, type Capability } from './auth.js';
@@ -23,7 +24,7 @@ const log = logger('api');
 interface Deps {
   cfg: Config; pool: Pool; store: Store; runner: Runner; scheduler: Scheduler;
   tokens: TokenStore; audit: AuditLog; artifacts: ArtifactStore; llmName: string | null;
-  edge: EdgeVerifier;
+  edge: EdgeVerifier; platforms: Platforms;
 }
 
 export function createServer(d: Deps): http.Server {
@@ -64,7 +65,10 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
   const edge = await d.edge.verify(req, remote);
 
   if (method === 'GET' && url.pathname === '/health') {
-    return send(res, 200, { ok: true, version: 3, llm: d.llmName, pool: d.pool.list().length, edge: d.edge.mode });
+    return send(res, 200, {
+      ok: true, version: 4, llm: d.llmName, pool: d.pool.list().length, edge: d.edge.mode,
+      platforms: d.platforms.available(),
+    });
   }
 
   const who = d.tokens.verify(bearer(req));
@@ -236,7 +240,7 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
     }
     if (method === 'POST' && id === 'devices') {
       d.tokens.require(who, 'pool:write');
-      const body = await readJson<{ deviceType?: string; runtime?: string; count?: number }>(req).catch(() => ({}));
+      const body = await readJson<{ platform?: PlatformId; deviceType?: string; runtime?: string; count?: number }>(req).catch(() => ({}));
       const added = await d.pool.add(body);
       // Newly added devices are `pending` here and become `ready` once the
       // pool loop has booted them.
@@ -256,8 +260,8 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
     d.tokens.require(who, 'inspect');
     const device = d.pool.get(id) ?? d.pool.list().find((x) => x.name === id);
     if (!device) throw new HttpError(404, `no pooled device ${id}`);
-    const screen = await new Axe(d.cfg.axeBin, device.udid).describe();
-    return send(res, 200, { device: device.name, ...screen });
+    const screen = await d.platforms.get(device.platform).ui(device.udid).describe();
+    return send(res, 200, { device: device.name, platform: device.platform, ...screen });
   }
 
   throw new HttpError(404, `no route for ${method} ${url.pathname}`);
@@ -284,8 +288,59 @@ function bindIdentity(d: Deps, edge: EdgeIdentity, who: Identity, remote: string
     `edge identity "${edge.subject}" is not permitted to use the "${who.name}" token`);
 }
 
+/**
+ * Work out from an app spec which platform it is for, or null when it says
+ * nothing either way. Only unambiguous signals count -- a wrong guess would
+ * lease the wrong kind of device and fail deep in an install.
+ */
+function inferPlatform(d: Deps, app?: AppSpec): PlatformId | null {
+  if (!app) return null;
+  if (app.module || app.variant) return 'android';
+  if (app.scheme || app.workspace || app.configuration) return 'ios';
+  if (app.artifactId) {
+    const artifact = d.artifacts.get(app.artifactId);
+    if (artifact?.platform) return artifact.platform;
+  }
+  for (const named of [app.path, app.url]) {
+    if (!named) continue;
+    if (/\.apk($|[?#])/i.test(named)) return 'android';
+    if (/\.(app|ipa)($|[?#])/i.test(named)) return 'ios';
+  }
+  if (app.project) return /\.xcodeproj$/i.test(app.project) ? 'ios' : 'android';
+  return null;
+}
+
+/** The platform a run will use, settled once at submit so the scheduler and
+ *  the runner cannot disagree about it. */
+function resolvePlatform(d: Deps, body: RunRequest): PlatformId {
+  if (body.device?.platform) return body.device.platform;
+  if (body.device?.udid) {
+    const pinned = d.pool.get(body.device.udid);
+    if (pinned) return pinned.platform;
+  }
+  if (body.instrumentation) return 'android';
+  if (body.xctest) return 'ios';
+  return inferPlatform(d, body.app) ?? d.platforms.default();
+}
+
 async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, edge: EdgeIdentity): Promise<Run> {
   validate(d, body);
+
+  const platform = resolvePlatform(d, body);
+  if (!d.platforms.has(platform)) {
+    throw new HttpError(503,
+      `this daemon cannot run ${platform} tests: ${d.platforms.reason(platform)}. ` +
+      `Available: ${d.platforms.available().join(', ') || 'none'}.`);
+  }
+  if (platform === 'ios' && body.instrumentation) {
+    throw new HttpError(400, '`instrumentation` is an Android suite; an iOS run wants `xctest`');
+  }
+  if (platform === 'android' && body.xctest) {
+    throw new HttpError(400, '`xctest` is an iOS suite; an Android run wants `instrumentation`');
+  }
+  // Pin it onto the request so the pool leases the right kind of device even
+  // when the caller left `device` off entirely.
+  body.device = { ...body.device, platform };
 
   // Resolve the build host now rather than at run time: a caller should learn
   // straight away that a URL is unreachable, instead of polling a run that was
@@ -294,7 +349,7 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
 
   // The capability needed depends on how the build was supplied. Naming a
   // local project means running its build phases, so it is gated separately.
-  const needed: Capability = body.xctest ? 'runs:submit:local'
+  const needed: Capability = (body.xctest || body.instrumentation) ? 'runs:submit:local'
     : body.app.artifactId ? 'runs:submit:artifact'
     : (body.app.url || body.app.github) ? 'runs:submit:url'
     : (body.app.path || body.app.scheme) ? 'runs:submit:local'
@@ -331,7 +386,9 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
     id: newId(),
     status: 'pending',
     request: stored,
-    mode: body.xctest ? 'xctest' : body.steps?.length ? 'steps' : 'scenario',
+    mode: body.xctest ? 'xctest'
+      : body.instrumentation ? 'instrumentation'
+      : body.steps?.length ? 'steps' : 'scenario',
     createdAt: nowIso(),
     submittedBy: { tokenId: who.id, tokenName: who.name },
     queuePositionAtSubmit: d.store.pending().length,
@@ -344,7 +401,7 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
   if (secretHeaders) d.store.setSecret(run.id, secretHeaders);
   d.audit.record({
     token: who.name, tokenId: who.id, action: 'runs.submit', outcome: 'ok', remote, runId: run.id,
-    detail: { mode: run.mode, appMode: needed, label: body.label ?? null, edge: `${edge.via}:${edge.subject}` },
+    detail: { mode: run.mode, platform, appMode: needed, label: body.label ?? null, edge: `${edge.via}:${edge.subject}` },
   });
   log.info(`queued ${run.id} (${run.mode}) for ${who.name}${body.label ? ` "${body.label}"` : ''}`);
   d.scheduler.tick();
@@ -353,9 +410,12 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
 
 function validate(d: Deps, body: RunRequest): void {
   if (!body || typeof body !== 'object') throw new HttpError(400, 'body must be a JSON object');
-  // xcodebuild builds, installs and launches the app for an XCUITest run, so
+  if (body.xctest && body.instrumentation) {
+    throw new HttpError(400, 'give either `xctest` (iOS) or `instrumentation` (Android), not both');
+  }
+  // The platform's own test runner builds, installs and launches the app, so
   // the caller need not describe one at all.
-  if (!body.app && body.xctest) return;
+  if (!body.app && (body.xctest || body.instrumentation)) return;
   if (!body.app) throw new HttpError(400, 'app is required');
   const { path: appPath, scheme, project, workspace, bundleId, artifactId, url } = body.app;
   if (url) {
@@ -375,16 +435,17 @@ function validate(d: Deps, body: RunRequest): void {
   if (body.app.github && url) {
     throw new HttpError(400, 'give either app.url or app.github, not both');
   }
-  if (body.xctest && !appPath && !scheme && !bundleId && !artifactId && !url && !body.app.github) {
-    return;   // xcodebuild builds and installs the app itself
+  if ((body.xctest || body.instrumentation) && !appPath && !scheme && !bundleId && !artifactId && !url && !body.app.github) {
+    return;   // the platform test runner builds and installs the app itself
   }
   if (!appPath && !scheme && !bundleId && !artifactId && !url && !body.app.github) {
     throw new HttpError(400,
       'app needs one of: `github` (newest matching Actions artifact), `url` (a zipped simulator .app ' +
-      'the daemon downloads), `artifactId` (an uploaded .app), ' +
-      '`path` (a built .app or a zip of one), ' +
-      '`scheme` plus `project`/`workspace` (build from source), or `bundleId` alone ' +
-      '(an app already installed on the pooled simulators)');
+      'or an .apk the daemon downloads), `artifactId` (an uploaded build), ' +
+      '`path` (a built .app/.apk or a zip of one), ' +
+      '`scheme` plus `project`/`workspace` (build an iOS app from source), ' +
+      '`project` plus `module` (build an Android app from Gradle), or `bundleId` alone ' +
+      '(an app already installed on the pooled devices)');
   }
   if (artifactId && !d.artifacts.get(artifactId)) {
     throw new HttpError(404, `no uploaded artifact "${artifactId}" -- upload it first with POST /v1/artifacts`);
@@ -392,7 +453,21 @@ function validate(d: Deps, body: RunRequest): void {
   if (scheme && !project && !workspace && !appPath) {
     throw new HttpError(400, 'building from source needs app.project (.xcodeproj) or app.workspace (.xcworkspace)');
   }
-  if (body.xctest) {
+  if (body.app.module && !project && !appPath) {
+    throw new HttpError(400, 'building an Android app from source needs app.project (the Gradle project directory)');
+  }
+  if (body.instrumentation) {
+    const t = body.instrumentation;
+    if (!t.project && !t.testApk) {
+      throw new HttpError(400, 'instrumentation needs `project` (a Gradle project to build from) or `testApk` plus `appApk` (pre-built)');
+    }
+    if (t.testApk && !t.appApk) {
+      throw new HttpError(400, 'instrumentation with `testApk` also needs `appApk` -- a test APK instruments an app that must be installed alongside it');
+    }
+    if (body.scenario || body.steps?.length) {
+      throw new HttpError(400, '`instrumentation` cannot be combined with `scenario` or `steps`');
+    }
+  } else if (body.xctest) {
     const x = body.xctest;
     if (!x.xctestrun && !x.scheme) {
       throw new HttpError(400, 'xctest needs `xctestrun` (a pre-built bundle) or `scheme` plus `project`/`workspace`');
@@ -404,7 +479,9 @@ function validate(d: Deps, body: RunRequest): void {
       throw new HttpError(400, '`xctest` cannot be combined with `scenario` or `steps`');
     }
   } else if (!body.scenario && !body.steps?.length) {
-    throw new HttpError(400, 'provide `scenario` (natural language), `steps` (explicit actions), or `xctest` (an XCUITest bundle)');
+    throw new HttpError(400,
+      'provide `scenario` (natural language), `steps` (explicit actions), ' +
+      '`xctest` (an XCUITest bundle) or `instrumentation` (an Android instrumentation suite)');
   }
   if (body.scenario && body.steps?.length) {
     throw new HttpError(400, '`scenario` and `steps` are mutually exclusive');
