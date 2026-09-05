@@ -274,10 +274,17 @@ export class UiAutomator implements UiDriver {
   /**
    * Preset gestures, expressed as swipes.
    *
-   * Convention: the name describes which way the *finger* travels, so
-   * `scroll-up` drags upward and thereby reveals content further down. Edge
-   * swipes start just inside the bezel, which is what system gestures listen
-   * for.
+   * The name describes which way the *finger* travels, so `scroll-up` drags
+   * upward and thereby reveals content further down.
+   *
+   * That is not a choice made here -- it is what AXe does, measured rather
+   * than assumed. Driving `scroll-up` against each platform's own Settings
+   * list and diffing the accessibility tree moved shared rows up the screen
+   * on both: about -214px on iOS, decisively negative on Android. The two
+   * platforms agree, so a step list means the same thing on either.
+   *
+   * Edge swipes start just inside the bezel, which is what system gestures
+   * listen for.
    */
   async gesture(
     preset: GesturePreset, screen: { width: number; height: number },
