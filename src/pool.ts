@@ -34,6 +34,9 @@ interface PoolSpec {
 export class Pool {
   private devices = new Map<string, PooledDevice>();
   private reconciling = false;
+  /** The last shortfall reason logged, so a standing cause is not repeated
+   *  every reconcile pass. */
+  private lastShortfall?: string;
   private timer?: NodeJS.Timeout;
   private stopped = false;
 
@@ -430,7 +433,25 @@ export class Pool {
       const alive = this.list().filter((d) => d.status !== 'offline');
       for (const spec of this.desired()) {
         const have = alive.filter((d) => this.satisfies(d, spec)).length;
-        if (have < spec.count && !this.atCapacity() && !this.diskTooTight(spec.platform)) {
+        if (have >= spec.count) continue;
+
+        // Say why the pool is short rather than silently staying that way.
+        // "target 2, ready 1" with no explanation is precisely the state a
+        // reader cannot act on. Reconcile runs every few seconds, so the
+        // reason is logged once per cause rather than on every pass.
+        const blocked = this.atCapacity()
+          ? `at maxPoolDevices (${this.cfg.maxPoolDevices})`
+          : this.diskTooTight(spec.platform);
+        if (blocked) {
+          const key = `${spec.platform}/${spec.deviceType}: ${blocked}`;
+          if (this.lastShortfall !== key) {
+            this.lastShortfall = key;
+            log.warn(`pool is ${spec.count - have} short of ${spec.deviceType} (${spec.platform})`, blocked);
+          }
+          continue;
+        }
+        delete this.lastShortfall;
+        {
           await this.add({
             platform: spec.platform,
             deviceType: spec.deviceType,

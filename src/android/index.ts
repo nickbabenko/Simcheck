@@ -23,11 +23,19 @@ import { resolveDriverApks, installDriver, UiAutomatorTouch, type DriverApks } f
 const log = logger('android');
 
 /**
- * An emulator is a whole virtual machine, not a process sharing a runtime the
- * way a simulator does: its userdata image alone grows into the several-GB
- * range, on top of the system image it was created from.
+ * Measured, not guessed: creating and first-booting a pixel_7 on an
+ * already-installed API 35 image consumed 1.07GB.
+ *
+ * The intuition that an emulator is a whole virtual machine and must therefore
+ * be huge is wrong in the way that matters here. The system image is the large
+ * part and it is shared between every AVD built from it -- a one-off
+ * sdkmanager download, not a per-device cost -- and the userdata image is
+ * sparse, so a fresh device barely dents the disk. The budget is set well
+ * above the measurement because userdata does grow as builds are installed
+ * and caches fill, but a first guess of 10GB blocked pool creation on any
+ * machine with less than 14GB free, for no reason at all.
  */
-const DISK_COST_GB = 10;
+const DISK_COST_GB = 4;
 
 /**
  * Short names for the permissions people actually ask about, so a step reads
