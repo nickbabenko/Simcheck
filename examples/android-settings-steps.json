@@ -1,0 +1,14 @@
+{
+  "label": "smoke test: drive the preinstalled Android Settings app",
+  "app": { "bundleId": "com.android.settings" },
+  "device": { "platform": "android" },
+  "screenshots": ["settings-root", "settings-dark"],
+  "steps": [
+    { "action": "wait", "ms": 2000 },
+    { "action": "screenshot", "name": "settings-root", "note": "Settings landing screen, light" },
+    { "action": "appearance", "mode": "dark" },
+    { "action": "wait", "ms": 1500 },
+    { "action": "screenshot", "name": "settings-dark", "note": "The same screen in dark mode" },
+    { "action": "button", "button": "back" }
+  ]
+}

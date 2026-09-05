@@ -2,7 +2,8 @@
 
 | File | Needs a build? | |
 |---|---|---|
-| `settings-steps.json` | no | Drives the preinstalled Settings app with explicit steps. The fastest way to check the harness works. |
+| `settings-steps.json` | no | Drives the preinstalled iOS Settings app with explicit steps. The fastest way to check the harness works. |
+| `android-settings-steps.json` | no | The Android counterpart: drives Settings on an emulator and toggles dark mode. Needs a pooled Android device. |
 | `settings-scenario.json` | no | Same app, driven by a natural-language scenario. Exercises the model backend. |
 | `demo-steps.json` | yes | Builds `DemoApp/` from source and drives a sign-in flow. Exercises the `xcodebuild` path. |
 

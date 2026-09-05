@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>simcheck — hand off iOS testing to an agent</title>
-<meta name="description" content="Submit a build, a test scenario and the screenshots you want back. A pool of pre-booted iOS simulators does the rest.">
+<title>simcheck — hand off mobile testing to an agent</title>
+<meta name="description" content="Submit a build, a test scenario and the screenshots you want back. A pool of pre-booted iOS simulators and Android emulators does the rest.">
 <meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#111113" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📱</text></svg>">
@@ -152,7 +152,7 @@
   <div class="grp">How it works</div>
   <a href="#flow">The flow</a>
   <a href="#pool">The pool</a>
-  <a href="#scenarios">Two ways to test</a>
+  <a href="#scenarios">Three ways to test</a>
   <div class="grp">Setup</div>
   <a href="#install">Install</a>
   <a href="#agents">Connect an agent</a>
@@ -167,23 +167,31 @@
 
 <h1>simcheck</h1>
 <p class="lede">
-  Hand off iOS testing to a pool of pre-booted simulators. An agent submits a
-  build, a test scenario and the screenshots it wants back — and gets evidence,
-  not assurances.
+  Hand off mobile testing to a pool of pre-booted iOS simulators and Android
+  emulators. An agent submits a build, a test scenario and the screenshots it
+  wants back — and gets evidence, not assurances.
 </p>
 
 <h2 id="what">What it is</h2>
 <p>
-  An agent that has just changed iOS UI code has no way to know it worked. It can
-  read the diff, it can reason about the view hierarchy, and it can still be
-  wrong. simcheck closes that loop: it runs the build on a real simulator,
-  drives the flow, and returns named screenshots.
+  An agent that has just changed mobile UI code has no way to know it worked. It
+  can read the diff, it can reason about the view hierarchy, and it can still be
+  wrong. simcheck closes that loop: it runs the build on a real simulator or
+  emulator, drives the flow, and returns named screenshots.
 </p>
 <p>
   The output is designed to be pasted into a pull request. A reviewer sees the
   verdict, the assertion it was judged against, and a picture of the screen —
   rather than a claim that the toggle now works.
 </p>
+
+<div class="note">
+  <p><span class="lbl">One harness, both platforms.</span> The platform is
+  inferred from the build — an <code>.apk</code> means Android, a
+  <code>.app</code> means iOS — so most requests never mention it. A step
+  written for one reads the same on the other, because both drivers flatten
+  their native accessibility tree into one vocabulary.</p>
+</div>
 
 <div class="note">
   <p><span class="lbl">The rule it enforces:</span> a run only passes if every
@@ -194,8 +202,8 @@
 <h2 id="features">Features</h2>
 <div class="grid">
   <div class="card">
-    <h3>Warm simulator pool</h3>
-    <p>N simulators kept booted and idle. No cold-boot tax on the first run, and pool size is the concurrency limit.</p>
+    <h3>Warm device pool</h3>
+    <p>Simulators and emulators kept booted and idle, in one pool. No cold-boot tax on the first run, and pool size is the concurrency limit.</p>
   </div>
   <div class="card">
     <h3>Natural language or exact steps</h3>
@@ -217,16 +225,24 @@
     <h3>Clean between runs</h3>
     <p>Each device is reset and its screen sanitised, so one run's permission dialog can't break the next.</p>
   </div>
+  <div class="card">
+    <h3>Real multi-touch</h3>
+    <p>Genuine two-contact pinch, pan and double tap on both platforms — so a zoom claim is assertable, not perceptual.</p>
+  </div>
+  <div class="card">
+    <h3>Or the app's own tests</h3>
+    <p>Run an XCUITest bundle or an Android instrumentation suite when the claim needs state a screenshot can't settle.</p>
+  </div>
 </div>
 
 <h2 id="flow">How it works</h2>
 <p>
-  A daemon owns a pool of simulators and a queue of runs. Everything else — the
+  A daemon owns a pool of devices and a queue of runs. Everything else — the
   CLI, the MCP server, your agent — is a client of its HTTP API.
 </p>
 
 <div class="flow">
-<svg viewBox="0 0 720 250" role="img" aria-label="Agent submits a run; the daemon queues it, leases a simulator, drives the app and returns screenshots.">
+<svg viewBox="0 0 720 250" role="img" aria-label="Agent submits a run; the daemon queues it, leases a simulator or emulator, drives the app and returns screenshots.">
   <rect x="0" y="30" width="150" height="58" rx="9"/>
   <text x="16" y="55">agent</text>
   <text x="16" y="73" class="m">Claude / Codex / …</text>
@@ -237,13 +253,13 @@
 
   <rect x="560" y="8" width="150" height="42" rx="9"/>
   <text x="576" y="27">simcheck-01</text>
-  <text x="576" y="42" class="m">ready</text>
+  <text x="576" y="42" class="m">iOS · ready</text>
   <rect x="560" y="58" width="150" height="42" rx="9"/>
   <text x="576" y="77">simcheck-02</text>
-  <text x="576" y="92" class="m">leased</text>
+  <text x="576" y="92" class="m">iOS · leased</text>
   <rect x="560" y="108" width="150" height="42" rx="9"/>
   <text x="576" y="127">simcheck-03</text>
-  <text x="576" y="142" class="m">pending</text>
+  <text x="576" y="142" class="m">Android · ready</text>
 
   <line x1="150" y1="48" x2="264" y2="48" marker-end="url(#a)"/>
   <text x="160" y="41" class="m">1. submit</text>
@@ -275,7 +291,7 @@
 <p>A run moves through these states:</p>
 <table>
   <tr><th>State</th><th>Meaning</th></tr>
-  <tr><td><code>pending</code></td><td>Queued. No simulator free yet.</td></tr>
+  <tr><td><code>pending</code></td><td>Queued. No matching device free yet.</td></tr>
   <tr><td><code>preparing</code></td><td>Device leased; building or installing.</td></tr>
   <tr><td><code>running</code></td><td>Driving the app.</td></tr>
   <tr><td><code>passed</code></td><td>Assertion held and every requested screenshot exists.</td></tr>
@@ -286,15 +302,32 @@
 
 <h3 id="pool">The pool</h3>
 <p>
-  Simulators are kept booted so a run starts immediately. A device added to the
-  pool is <code>pending</code> until it has been booted, then <code>ready</code>;
-  it becomes <code>leased</code> for the duration of a run and
+  Devices are kept booted so a run starts immediately. One added to the pool is
+  <code>pending</code> until it has been booted, then <code>ready</code>; it
+  becomes <code>leased</code> for the duration of a run and
   <code>recycling</code> while it is reset.
 </p>
+<p>
+  The pool is heterogeneous: iOS simulators and Android emulators sit in it
+  together, and a run leases whichever matches. A request that names no platform
+  gets one inferred from its build. Configure the mix with <code>pool</code>:
+</p>
+<pre><code>"pool": [
+  { "platform": "ios",     "deviceType": "iPhone 17 Pro", "runtime": "26.3", "count": 2 },
+  { "platform": "android", "deviceType": "pixel_7",       "runtime": "35",   "count": 1 }
+]</code></pre>
 <div class="note warn">
   <p><span class="lbl">It only touches its own devices.</span> The pool creates,
-  boots, erases and deletes simulators named <code>simcheck-*</code> and
-  nothing else. The simulators you use in Xcode are never affected.</p>
+  boots, erases and deletes simulators and AVDs named <code>simcheck-*</code>
+  and nothing else. The simulators you use in Xcode and the AVDs you use in
+  Android Studio are never affected.</p>
+</div>
+<div class="note">
+  <p><span class="lbl">An emulator costs more than a simulator.</span> It is a
+  whole virtual machine rather than a process sharing a runtime, so the pool
+  budgets ~10&nbsp;GB of disk for one against ~8&nbsp;GB for a simulator, and
+  refuses to create either if that would take you below
+  <code>minFreeDiskGb</code>. Boot takes roughly half a minute.</p>
 </div>
 <p>
   Recycling uninstalls the app and then <em>sanitises the screen</em>. That second
@@ -305,8 +338,14 @@
   choosing the declining option, never granting a permission), and the device is
   rebooted if that fails.
 </p>
+<p>
+  Android needs less of this, and the difference is real rather than an
+  omission: uninstalling a package there drops every permission grant with it,
+  so a reinstall already prompts afresh. iOS keeps TCC grants past an
+  uninstall, which is why it needs an explicit reset.
+</p>
 
-<h3 id="scenarios">Two ways to describe a test</h3>
+<h3 id="scenarios">Three ways to describe a test</h3>
 <p>
   <strong>Natural language</strong> — an agent reads the accessibility tree,
   works out the taps, and captures the screenshots you named:
@@ -331,9 +370,23 @@
   actions it took. Lift those into a <code>steps</code> run and a one-off
   exploration becomes a repeatable regression check that costs nothing.</p>
 </div>
+<p>
+  <strong>The app's own test suite</strong> — for a claim the screen cannot
+  settle. That a gesture changed a zoom factor, that a callback fired, that
+  state is <em>correct</em> rather than merely looking correct: those are
+  assertions, and they belong inside the app. simcheck supplies a warm device
+  and turns the result into the same evidence report as any other run.
+</p>
+<pre><code>{ "xctest": { "scheme": "AppUITests", "project": "App.xcodeproj",
+              "only": ["AppUITests/PinchTests/testZoom"] } }
+
+{ "instrumentation": { "project": "/abs/path/to/gradle-project",
+                       "only": ["com.example.PinchTest#testZoom"] } }</code></pre>
 
 <h2 id="install">Install</h2>
-<p>Requires macOS, Node 20+, Xcode with an iOS simulator runtime, and Homebrew.</p>
+<p>Requires macOS, Node 20+ and Homebrew. Neither platform is mandatory — a Mac
+  with Xcode and no Android SDK runs iOS and reports Android as unavailable with
+  a reason, and the reverse holds too.</p>
 <pre><code>git clone &lt;repo&gt; ~/Developer/simcheck
 cd ~/Developer/simcheck
 ./install.sh</code></pre>
@@ -341,11 +394,29 @@ cd ~/Developer/simcheck
   <a href="https://github.com/cameroncooke/AXe">AXe</a> simulator driver, builds,
   links <code>simcheck</code> into <code>~/.local/bin</code>, registers a
   launchd agent so the pool is warm after a reboot, and installs the Claude skill
-  and MCP server.</p>
+  and MCP server. If it finds an Android SDK it also builds the multi-touch
+  driver APK; if it doesn't, it says so and carries on.</p>
+<p><strong>For iOS:</strong> Xcode with a simulator runtime installed.
+  <strong>For Android:</strong></p>
+<pre><code>brew install --cask android-commandlinetools android-platform-tools
+brew install openjdk@21 gradle
+sdkmanager "emulator" "build-tools;35.0.0" \
+           "system-images;android-35;google_apis;arm64-v8a"</code></pre>
+<div class="note warn">
+  <p><span class="lbl">Homebrew's JDKs are keg-only.</span> They never register
+  with the <code>/usr/bin/java</code> stub, so a machine can hold three JDKs and
+  still fail every Android tool with <em>"Unable to locate a Java Runtime"</em>.
+  simcheck resolves a JDK by path rather than trusting <code>java</code>, and
+  bakes <code>JAVA_HOME</code> and <code>ANDROID_HOME</code> into the launchd
+  plist — launchd's environment is not a login shell, so neither survives into
+  it otherwise.</p>
+</div>
 <p>Then confirm the environment is sane:</p>
 <pre><code>simcheck doctor</code></pre>
+<p><code>doctor</code> reports both platforms, and every failure carries the
+  command that fixes it.</p>
 <div class="note warn">
-  <p><span class="lbl">Most common failure:</span> your Xcode SDK is older than
+  <p><span class="lbl">Most common iOS failure:</span> your Xcode SDK is older than
   your installed simulator runtimes. <code>xcodebuild</code> cannot target a
   runtime newer than its SDK, so every build-from-source run fails with a
   confusing "no destination" error. <code>doctor</code> detects this and tells
@@ -443,20 +514,21 @@ args:    ["/Users/you/Developer/simcheck/dist/mcp.js"]</code></pre>
 <h3>The tools your agent gets</h3>
 <table>
   <tr><th>Tool</th><th>Does</th></tr>
-  <tr><td><code>run_ios_test</code></td><td>Queue a run, returns a run id immediately</td></tr>
+  <tr><td><code>run_device_test</code></td><td>Queue a run, returns a run id immediately. <code>run_ios_test</code> remains as a deprecated alias pinned to iOS</td></tr>
   <tr><td><code>wait_for_test_run</code></td><td>Block until it finishes</td></tr>
   <tr><td><code>get_test_run</code></td><td>Current state, optionally the full trace</td></tr>
   <tr><td><code>get_test_screenshot</code></td><td>One screenshot, <strong>as an image</strong> the agent can look at</td></tr>
   <tr><td><code>get_test_report</code></td><td>The markdown write-up for a PR</td></tr>
   <tr><td><code>list_test_runs</code>, <code>cancel_test_run</code></td><td>Housekeeping</td></tr>
-  <tr><td><code>sim_pool_status</code>, <code>sim_pool_add</code></td><td>Pool state and capacity</td></tr>
-  <tr><td><code>inspect_simulator</code></td><td>Live accessibility tree, for authoring exact steps</td></tr>
+  <tr><td><code>sim_pool_status</code>, <code>sim_pool_add</code></td><td>Pool state and capacity, across both platforms</td></tr>
+  <tr><td><code>inspect_simulator</code></td><td>Live accessibility tree of a simulator or emulator, for authoring exact steps</td></tr>
   <tr><td><code>list_uploaded_builds</code>, <code>whoami</code></td><td>Artifacts, and what your token may do</td></tr>
 </table>
 
 <h2 id="first">First run</h2>
-<p>No build needed — this drives the simulator's own Settings app:</p>
-<pre><code>simcheck submit examples/settings-steps.json --wait</code></pre>
+<p>No build needed — these drive the device's own Settings app:</p>
+<pre><code>simcheck submit examples/settings-steps.json --wait          # iOS
+simcheck submit examples/android-settings-steps.json --wait  # Android</code></pre>
 <p>Or ask your agent, in plain English:</p>
 <pre><code>Run the login flow on a simulator and show me a screenshot of the
 settings screen with dark mode on.</code></pre>
@@ -464,17 +536,21 @@ settings screen with dark mode on.</code></pre>
 <pre><code>report.md          the evidence write-up
 screenshots/*.png  every named capture, plus final-state
 run.json           full state, including executedSteps and the trace
-app.log            the app's own log output
-build.log          xcodebuild output, when built from source</code></pre>
+app.log            the app's own log output (logcat, on Android)
+build.log          xcodebuild or gradle output, when built from source
+attachments/       files the app's own test suite saved</code></pre>
 
 <h2 id="security">Security</h2>
 <div class="note danger">
   <p><span class="lbl">Read this before exposing it.</span> Submitting
   <code>{"project": "App.xcodeproj"}</code> makes the daemon run
   <code>xcodebuild</code>, and Xcode Run Script build phases execute arbitrary
-  shell <strong>as you</strong>. Anyone who can name a local project has code
-  execution on that Mac. That is inherent to any build service — which is why
-  tokens are scoped rather than all-powerful.</p>
+  shell <strong>as you</strong>. Pointing it at a Gradle project is the same
+  bargain: a <code>build.gradle</code> is a program, and it runs as you too.
+  Anyone who can name a local project has code execution on that Mac. That is
+  inherent to any build service — which is why the capability to name a local
+  path (<code>runs:submit:local</code>) is separate from the capability to run
+  an uploaded build, and why no remote preset grants it.</p>
 </div>
 <p>
   By default the daemon binds <code>127.0.0.1</code> only, and
@@ -534,8 +610,9 @@ simcheck token revoke cloud</code></pre>
   <div class="card">
     <h3>Build here, test there</h3>
     <p><code>simcheck upload --scheme App --project App.xcodeproj</code> builds,
-      zips and uploads; the far side references the artifact id. Only the compiled
-      bundle moves, never the source.</p>
+      zips and uploads; the far side references the artifact id. Android is the
+      same shape — upload the <code>.apk</code> directly, no zipping needed. Only
+      the compiled build moves, never the source.</p>
   </div>
   <div class="card">
     <h3>A shared team pool</h3>
@@ -552,8 +629,9 @@ simcheck submit &lt;file.json&gt; --wait queue a run and follow it
 simcheck watch &lt;run-id&gt;            follow a run
 simcheck report &lt;run-id&gt;           markdown evidence
 simcheck inspect &lt;device&gt;          live accessibility tree
-simcheck upload &lt;App.app&gt;          upload a build, prints an artifact id
-simcheck pool add -n 2             add simulators
+simcheck upload &lt;App.app|app.apk&gt;  upload a build, prints an artifact id
+simcheck pool add -n 2             add devices
+       [--platform ios|android] [--device …] [--runtime …]
 simcheck token list|create|revoke  manage access
 simcheck mcp-config [agent]        MCP setup for your agent
 simcheck tunnel &lt;hostname&gt;         scaffold Cloudflare Tunnel + Access</code></pre>
@@ -566,7 +644,7 @@ GET    /v1/runs/:id/wait?timeoutMs=      long-poll until terminal
 GET    /v1/runs/:id/report               markdown
 GET    /v1/runs/:id/screenshots/:name    PNG
 DELETE /v1/runs/:id                      cancel
-POST   /v1/artifacts                     upload a zipped .app
+POST   /v1/artifacts                     upload a zipped .app, or an .apk
 GET    /v1/pool                          pool state
 GET    /v1/whoami                        this token's capabilities
 GET    /health                           liveness</code></pre>
@@ -581,11 +659,28 @@ GET    /health                           liveness</code></pre>
   <code>permission</code>, <code>launch</code>, <code>relaunch</code>,
   <code>terminate</code>, <code>describe_ui</code>.
 </p>
+<p>
+  Multi-touch — <code>pinch</code>, <code>pan</code>,
+  <code>two_finger_press</code>, <code>double_tap</code> — needs a driver on
+  either platform: <code>baguette</code> on iOS, and the bundled driver APK on
+  Android (<code>./driver/build.sh</code>). Without it those steps fail with an
+  explanation rather than being faked from a single-finger swipe, because a
+  gesture the harness cannot really perform must not silently pass.
+</p>
+<table>
+  <tr><th>Differs by platform</th><th></th></tr>
+  <tr><td><code>button</code></td><td><code>home</code>, <code>lock</code>, <code>side-button</code>, <code>siri</code>, <code>apple-pay</code> on iOS; <code>home</code>, <code>back</code>, <code>recents</code>, <code>power</code>, <code>volume-up</code>, <code>volume-down</code>, <code>menu</code> on Android. One the platform lacks is refused, not quietly swapped.</td></tr>
+  <tr><td><code>permission</code></td><td>Short names (<code>camera</code>, <code>location</code>) work on both; a fully-qualified <code>android.permission.*</code> passes through untouched.</td></tr>
+  <tr><td><code>launchArgs</code></td><td>iOS only. Android starts an app by intent, not with argv, so it is refused with a note pointing at <code>launchEnv</code> — which becomes string intent extras there.</td></tr>
+  <tr><td>Coordinates</td><td>Points on iOS, physical pixels on Android. Taps use whichever space the tree was read in, so it is self-consistent; the tree says which.</td></tr>
+</table>
 <div class="note">
   <p>Prefer <code>id</code> over <code>label</code> over coordinates. SwiftUI needs
   an explicit <code>.accessibilityIdentifier(...)</code> for <code>id</code>
-  targeting to work — worth adding as you go, since it makes every future test
-  cheaper.</p>
+  targeting to work; on Android <code>id</code> matches an
+  <code>android:id</code> resource name, with the
+  <code>com.example:id/</code> prefix stripped. Worth adding as you go, since it
+  makes every future test cheaper.</p>
 </div>
 
 <footer>
