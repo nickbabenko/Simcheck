@@ -736,6 +736,7 @@ build.log                xcodebuild output, when built from source
 | `src/oauth.ts` | OAuth 2.1 authorization server with pairing-code consent |
 | `src/cli.ts` | `simcheck` |
 | `examples/DemoApp/` | A tiny SwiftUI app to test the harness against |
+| `examples/DemoAndroidApp/` | Its Android counterpart, sharing the same identifiers, with an Espresso suite |
 | `docs/index.html` | The documentation page — served at [nickbabenko.github.io/Simcheck](https://nickbabenko.github.io/Simcheck/), opened locally by `simcheck docs` |
 
 ## Troubleshooting

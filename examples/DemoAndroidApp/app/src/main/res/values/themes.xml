@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      DayNight so `{"action":"appearance","mode":"dark"}` visibly changes the
+      app, not just the system chrome. The platform has no
+      DayNight.NoActionBar variant, so the bar is turned off by attribute.
+
+      No action bar, deliberately: Android 15 enforces edge-to-edge for
+      anything targeting SDK 35, so content draws behind the system bars. With
+      an action bar present the top of the layout ends up underneath it —
+      still "90% visible" as far as Espresso is concerned, so a click on it is
+      accepted and then swallowed by the bar on top, and the test fails
+      somewhere else entirely. The demo has no use for a bar, and no bar
+      cannot eat a tap.
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

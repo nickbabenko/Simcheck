@@ -118,6 +118,17 @@ class AndroidDevices implements DeviceBackend {
     });
     this.pendingWipe.delete(id);
 
+    // Espresso explicitly requires animations off, and says so in the failure
+    // when they are not: a transition in flight leaves a view VISIBLE but
+    // unlaid-out, and the click is refused for covering 0% of its own area.
+    // It also steadies the outside-in driver, whose taps race the same
+    // transitions. A pooled device exists to be predictable, so this belongs
+    // at boot rather than in each caller's test setup.
+    for (const scale of ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']) {
+      await this.adb.shellTry(serial, `settings put global ${scale} 0`, { timeoutMs: 30_000 })
+        .catch(() => log.warn(`could not disable ${scale} on ${id}`));
+    }
+
     // The multi-touch driver is per-device state, so it goes on at boot rather
     // than being reinstalled before every gesture.
     if (this.driver) {

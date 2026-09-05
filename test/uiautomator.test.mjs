@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHierarchy, parseBounds, normaliseRole } from '../dist/android/uiautomator.js';
-import { parseBadging, launchableFromManifest, assertRunnableAbi } from '../dist/android/apk.js';
+import { parseBadging, launchableFromManifest, assertRunnableAbi, parseXmlTree } from '../dist/android/apk.js';
 
 /** A trimmed but structurally faithful `uiautomator dump`. */
 const DUMP = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
@@ -124,4 +124,48 @@ test('an APK with no matching ABI is refused before it can crash on launch', () 
   // No native code at all runs anywhere, and must not be rejected.
   assert.doesNotThrow(() => assertRunnableAbi({ packageName: 'a', abis: [] }, ['arm64-v8a'], 'app.apk'));
   assert.doesNotThrow(() => assertRunnableAbi(x86Only, ['x86_64', 'arm64-v8a'], 'app.apk'));
+});
+
+/* ------------------------------------------------------- compiled manifest -- */
+
+/** Real `aapt2 dump xmltree` output, trimmed. `badging` reports neither the
+ *  instrumentation nor an activity-alias launcher entry, which is why this
+ *  path exists at all. */
+const XMLTREE = `N: android=http://schemas.android.com/apk/res/android
+  E: manifest (line=2)
+    A: package="com.simcheck.demo.test" (Raw: "com.simcheck.demo.test")
+      E: instrumentation (line=9)
+        A: http://schemas.android.com/apk/res/android:label(0x01010001)="Tests for com.simcheck.demo" (Raw: "Tests for com.simcheck.demo")
+        A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.test.runner.AndroidJUnitRunner" (Raw: "androidx.test.runner.AndroidJUnitRunner")
+        A: http://schemas.android.com/apk/res/android:targetPackage(0x01010021)="com.simcheck.demo" (Raw: "com.simcheck.demo")
+      E: application (line=20)
+          E: activity (line=30)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="androidx.test.core.app.InstrumentationActivityInvoker$BootstrapActivity"
+              E: intent-filter (line=33)
+                  E: category (line=34)
+                    A: http://schemas.android.com/apk/res/android:name(0x01010003)="android.intent.category.LAUNCHER" (Raw: "android.intent.category.LAUNCHER")`;
+
+const ALIAS_TREE = `N: android=http://schemas.android.com/apk/res/android
+  E: manifest (line=2)
+    A: package="com.example.app" (Raw: "com.example.app")
+      E: application (line=20)
+          E: activity (line=25)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="com.example.app.RealActivity"
+          E: activity-alias (line=30)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)=".Launcher"
+              E: intent-filter (line=33)
+                  E: category (line=34)
+                    A: http://schemas.android.com/apk/res/android:name(0x01010003)="android.intent.category.LAUNCHER" (Raw: "android.intent.category.LAUNCHER")`;
+
+test('the compiled manifest yields an instrumentation badging omits', () => {
+  const info = parseXmlTree(XMLTREE);
+  assert.equal(info.instrumentationRunner, 'androidx.test.runner.AndroidJUnitRunner');
+  assert.equal(info.instrumentationTarget, 'com.simcheck.demo');
+});
+
+test('a launcher entry declared as an activity-alias is found and qualified', () => {
+  const info = parseXmlTree(ALIAS_TREE);
+  // The alias carries LAUNCHER, not the activity above it -- and its relative
+  // name has to be qualified with the package.
+  assert.equal(info.launchActivity, 'com.example.app.Launcher');
 });

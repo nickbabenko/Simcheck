@@ -33,7 +33,23 @@ export async function readApk(tools: AndroidTools, apkPath: string): Promise<Apk
 
   if (tools.aapt2) {
     const r = await exec(tools.aapt2, ['dump', 'badging', apkPath], { timeoutMs: 120_000, env: tools.env });
-    if (r.code === 0) return parseBadging(r.stdout);
+    if (r.code === 0) {
+      const info = parseBadging(r.stdout);
+      // `badging` is a summary, and it omits things it has no line for: an
+      // <instrumentation> declaration is one (measured against an APK whose
+      // manifest plainly contains one), an <activity-alias> launcher entry is
+      // another. The compiled manifest is authoritative, so fall back to it
+      // rather than concluding the APK lacks what it actually declares.
+      if (!info.instrumentationRunner || !info.launchActivity) {
+        const fromManifest = await readCompiledManifest(tools, apkPath);
+        if (fromManifest) {
+          info.instrumentationRunner ??= fromManifest.instrumentationRunner;
+          info.instrumentationTarget ??= fromManifest.instrumentationTarget;
+          info.launchActivity ??= fromManifest.launchActivity;
+        }
+      }
+      return info;
+    }
     log.warn(`aapt2 could not read ${path.basename(apkPath)}`, r.stderr.trim().slice(0, 200));
   }
 
@@ -83,6 +99,86 @@ export function parseBadging(out: string): ApkInfo {
     ...(instrumentationTarget ? { instrumentationTarget } : {}),
     abis: [...new Set(abis)],
   };
+}
+
+/**
+ * Read what `badging` leaves out, from the compiled manifest.
+ *
+ * `aapt2 dump xmltree` prints the binary XML as an indented element tree:
+ *
+ *   E: instrumentation (line=9)
+ *     A: ...:name(0x01010003)="androidx.test.runner.AndroidJUnitRunner" (Raw: "...")
+ *     A: ...:targetPackage(0x01010021)="com.simcheck.demo" (Raw: "...")
+ *
+ * Attributes belong to the element above them, so the parse is a scan that
+ * remembers which element it is inside.
+ */
+async function readCompiledManifest(
+  tools: AndroidTools, apkPath: string,
+): Promise<Partial<ApkInfo> | null> {
+  const r = await exec(tools.aapt2!, ['dump', 'xmltree', apkPath, '--file', 'AndroidManifest.xml'],
+    { timeoutMs: 120_000, env: tools.env });
+  if (r.code !== 0) {
+    log.warn(`aapt2 dump xmltree failed for ${path.basename(apkPath)}`, r.stderr.trim().slice(0, 200));
+    return null;
+  }
+  return parseXmlTree(r.stdout);
+}
+
+/** The `package` attribute is not on every element, so activity names are
+ *  qualified by the caller when they start with a dot. */
+export function parseXmlTree(out: string): Partial<ApkInfo> {
+  const result: Partial<ApkInfo> = {};
+  let element: string | null = null;
+  let elementIndent = 0;
+  // An activity's LAUNCHER category appears in a nested intent-filter, so the
+  // candidate name is held until its filter proves it is the launcher.
+  let pendingActivity: string | null = null;
+  let sawLauncher = false;
+  let packageName: string | undefined;
+
+  const attr = (line: string, name: string): string | undefined =>
+    line.match(new RegExp(`:${name}\\(0x[0-9a-f]+\\)="([^"]*)"`))?.[1]
+    ?? line.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+
+  for (const raw of out.split('\n')) {
+    const indent = raw.search(/\S/);
+    const line = raw.trim();
+
+    const el = line.match(/^E: ([\w-]+)/);
+    if (el) {
+      // Leaving an activity subtree without having seen LAUNCHER: discard it.
+      if (pendingActivity && indent <= elementIndent && el[1] !== 'intent-filter' && el[1] !== 'category' && el[1] !== 'action') {
+        if (sawLauncher) result.launchActivity ??= pendingActivity;
+        pendingActivity = null;
+        sawLauncher = false;
+      }
+      element = el[1]!;
+      elementIndent = indent;
+      if (element === 'activity' || element === 'activity-alias') { pendingActivity = null; sawLauncher = false; }
+      continue;
+    }
+
+    if (!line.startsWith('A: ')) continue;
+
+    if (element === 'manifest') packageName ??= attr(line, 'package');
+    if (element === 'instrumentation') {
+      result.instrumentationRunner ??= attr(line, 'name');
+      result.instrumentationTarget ??= attr(line, 'targetPackage');
+    }
+    if (element === 'activity' || element === 'activity-alias') {
+      const name = attr(line, 'name');
+      if (name) pendingActivity ??= name;
+    }
+    if (element === 'category' && attr(line, 'name') === 'android.intent.category.LAUNCHER') {
+      sawLauncher = true;
+    }
+  }
+  if (pendingActivity && sawLauncher) result.launchActivity ??= pendingActivity;
+  if (result.launchActivity?.startsWith('.') && packageName) {
+    result.launchActivity = `${packageName}${result.launchActivity}`;
+  }
+  return result;
 }
 
 /** Fallback for an SDK with cmdline-tools but no build-tools. */

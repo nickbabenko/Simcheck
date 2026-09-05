@@ -1,0 +1,13 @@
+{
+  "label": "DemoAndroidApp instrumentation suite",
+  "app": {
+    "project": "DemoAndroidApp",
+    "module": ":app",
+    "variant": "debug"
+  },
+  "instrumentation": {
+    "project": "DemoAndroidApp",
+    "module": ":app",
+    "variant": "debug"
+  }
+}

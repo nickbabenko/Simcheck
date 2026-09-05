@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Two screens in a ViewFlipper: a login gate, then a home screen with a counter
+  and a settings section. The identifiers deliberately match the iOS DemoApp,
+  so the same step list drives both platforms.
+-->
+<ViewFlipper xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_flipper"
+    android:inAnimation="@null"
+    android:outAnimation="@null"
+    android:fitsSystemWindows="true"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- 0: sign in -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Sign in"
+            android:textSize="34sp"
+            android:textStyle="bold"
+            android:paddingBottom="24dp" />
+
+        <EditText
+            android:id="@+id/email_field"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Email"
+            android:inputType="textEmailAddress"
+            android:contentDescription="Email"
+            android:autofillHints="emailAddress" />
+
+        <EditText
+            android:id="@+id/password_field"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Password"
+            android:inputType="textPassword"
+            android:contentDescription="Password"
+            android:autofillHints="password" />
+
+        <TextView
+            android:id="@+id/login_error"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#d32f2f"
+            android:paddingTop="12dp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/sign_in_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Sign In" />
+    </LinearLayout>
+
+    <!-- 1: home -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <Button
+                android:id="@+id/counter_tab"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Counter" />
+            <Button
+                android:id="@+id/settings_tab"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Settings" />
+        </LinearLayout>
+
+        <!-- Two panes shown and hidden directly. A nested ViewAnimator here
+             looked tidier but does not reliably lay out the pane it reveals:
+             the revealed child requests a layout that never reaches the root,
+             so it stays 0x0 and Espresso refuses to click it. -->
+        <FrameLayout
+            android:id="@+id/tab_container"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <!-- counter -->
+            <LinearLayout
+                android:id="@+id/counter_pane"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:gravity="center">
+                <TextView
+                    android:id="@+id/count_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0"
+                    android:textSize="72sp"
+                    android:textStyle="bold" />
+                <Button
+                    android:id="@+id/increment_button"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="Increment" />
+            </LinearLayout>
+
+            <!-- settings -->
+            <LinearLayout
+                android:id="@+id/settings_pane"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:paddingTop="24dp">
+                <Switch
+                    android:id="@+id/notifications_toggle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingVertical="12dp"
+                    android:text="Notifications" />
+                <Switch
+                    android:id="@+id/beta_toggle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingVertical="12dp"
+                    android:text="Beta Features" />
+                <TextView
+                    android:id="@+id/beta_status"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="24dp"
+                    android:textSize="18sp"
+                    android:text="Beta features are OFF" />
+            </LinearLayout>
+        </FrameLayout>
+    </LinearLayout>
+</ViewFlipper>

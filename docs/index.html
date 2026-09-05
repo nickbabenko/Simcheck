@@ -382,6 +382,18 @@
 
 { "instrumentation": { "project": "/abs/path/to/gradle-project",
                        "only": ["com.example.PinchTest#testZoom"] } }</code></pre>
+<p>
+  Both are exercised by the bundled demo apps —
+  <code>examples/DemoApp</code> and <code>examples/DemoAndroidApp</code>, which
+  deliberately share their accessibility identifiers so one step list drives
+  either platform:
+</p>
+<pre><code>simcheck submit examples/android-instrumentation.json --wait</code></pre>
+<p>
+  Anything the suite saves into <code>additionalTestOutputDir</code> — a
+  screenshot at the moment of an assertion, say — is pulled back and attached
+  to the run alongside the harness's own captures.
+</p>
 
 <h2 id="install">Install</h2>
 <p>Requires macOS, Node 20+ and Homebrew. Neither platform is mandatory — a Mac

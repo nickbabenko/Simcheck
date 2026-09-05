@@ -31,12 +31,16 @@ export async function prepareApp(
     const serial = await adb.serialForOrNull(avd);
     if (serial) assertRunnableAbi(info, await deviceAbis(adb, serial), path.basename(apkPath));
 
-    // A test APK really has nothing to launch, and saying so here is far
-    // clearer than an install that succeeds and then starts nothing.
-    if (!info.launchActivity && info.instrumentationRunner) {
+    // An androidTest APK instruments a package other than its own. Testing for
+    // that rather than for a missing launch activity, because AndroidX adds its
+    // own LAUNCHER-categorised bootstrap activity to every test APK -- so
+    // "has nothing to launch" is not true of them and never was a safe tell.
+    if (info.instrumentationRunner && info.instrumentationTarget
+        && info.instrumentationTarget !== info.packageName) {
       throw new Error(
-        `${path.basename(apkPath)} declares an instrumentation runner and no launchable activity, ` +
-        'so it is an androidTest APK -- pass it as `instrumentation.testApk` instead.');
+        `${path.basename(apkPath)} is an androidTest APK -- it instruments ` +
+        `${info.instrumentationTarget}. Pass it as \`instrumentation.testApk\`, ` +
+        'with the app it tests as `instrumentation.appApk`.');
     }
     // No activity is not fatal: `aapt2 dump badging` does not report a
     // launcher entry declared through an <activity-alias>, which plenty of
