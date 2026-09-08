@@ -45,6 +45,7 @@ export function fakeIngress() {
   const routes = new Map()
   return {
     routes,
+    urlFor(slug) { return `http://${slug}.test:8080` },
     async attach(slug, up) { const u = `http://${slug}.test:8080`; routes.set(slug, up); return u },
     async detach(slug) { routes.delete(slug) },
     async listSlugs() { return [...routes.keys()] },

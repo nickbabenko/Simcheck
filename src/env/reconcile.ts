@@ -57,6 +57,16 @@ export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconcile
       }
     }
 
+    // 1b. Give up reservations nobody provisioned. They hold no containers, so
+    //     this is only tidying the table -- but a URL handed out and forgotten
+    //     should not stay allocated forever.
+    for (const rec of await d.store.list({ states: ['reserved'] })) {
+      if ((rec.reservedUntil ?? rec.expiresAt) <= now) {
+        await d.store.update(rec.id, { state: 'expired' });
+        touched.push(rec.id);
+      }
+    }
+
     // 2. Claim work under a lease, so two replicas cannot act on one env.
     for (const rec of await d.store.claimWork(opts.holder, now, opts.leaseMs, 4)) {
       try {

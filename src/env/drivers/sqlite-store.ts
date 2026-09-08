@@ -11,6 +11,8 @@ import type { EnvRecord, EnvState } from '../types.js'
 
 /** States the reconciler must act on. `ready` is excluded — a ready env needs
  *  nothing until it expires, and expiry is handled by its own sweep. */
+// 'reserved' is absent on purpose: a reservation has nothing to converge. It
+// waits for someone to provision it, or for its own clock to run out.
 const ACTIONABLE: EnvState[] = ['pending', 'provisioning', 'seeding', 'expired', 'destroying']
 
 const SCHEMA = `
@@ -26,6 +28,7 @@ CREATE TABLE IF NOT EXISTS envs (
   internal_cache_url TEXT,
   created_at       INTEGER NOT NULL,
   expires_at       INTEGER NOT NULL,
+  reserved_until   INTEGER,
   error            TEXT,
   lease_holder     TEXT,
   lease_expires_at INTEGER
@@ -37,7 +40,7 @@ CREATE INDEX IF NOT EXISTS envs_owner ON envs (owner_id, state);
 type Row = {
   id: string; slug: string; owner_id: string; spec: string; state: string
   url: string | null; host_port: number | null; internal_db_url: string | null; internal_cache_url: string | null
-  created_at: number; expires_at: number; error: string | null
+  created_at: number; expires_at: number; reserved_until: number | null; error: string | null
   lease_holder: string | null; lease_expires_at: number | null
 }
 
@@ -55,6 +58,7 @@ function toRecord(r: Row): EnvRecord {
   if (r.host_port !== null) rec.hostPort = r.host_port
   if (r.internal_db_url !== null) rec.internalDbUrl = r.internal_db_url
   if (r.internal_cache_url !== null) rec.internalCacheUrl = r.internal_cache_url
+  if (r.reserved_until !== null) rec.reservedUntil = r.reserved_until
   if (r.error !== null) rec.error = r.error
   if (r.lease_holder !== null) rec.leaseHolder = r.lease_holder
   if (r.lease_expires_at !== null) rec.leaseExpiresAt = r.lease_expires_at
@@ -65,8 +69,32 @@ function toRecord(r: Row): EnvRecord {
 const COLUMN: Record<string, string> = {
   slug: 'slug', ownerId: 'owner_id', state: 'state', url: 'url', hostPort: 'host_port',
   internalDbUrl: 'internal_db_url', internalCacheUrl: 'internal_cache_url',
-  expiresAt: 'expires_at', error: 'error',
+  expiresAt: 'expires_at', reservedUntil: 'reserved_until', error: 'error', spec: 'spec',
   leaseHolder: 'lease_holder', leaseExpiresAt: 'lease_expires_at',
+}
+
+/**
+ * Columns added after the table first shipped.
+ *
+ * CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a
+ * new column is invisible to every store created before it -- and every test
+ * passes regardless, because tests always start from an empty file. The failure
+ * only appears against a database someone has actually been using.
+ */
+const ADDED_COLUMNS: Array<[string, string]> = [
+  ['host_port', 'INTEGER'],
+  ['reserved_until', 'INTEGER'],
+]
+
+function migrate(db: DatabaseSync): void {
+  const present = new Set(
+    (db.prepare('PRAGMA table_info(envs)').all() as Array<{ name: string }>).map((c) => c.name),
+  )
+  for (const [name, type] of ADDED_COLUMNS) {
+    // Nullable with no default, so adding one is instant and cannot fail on a
+    // large table -- and absent reads back as "not set" rather than a wrong value.
+    if (!present.has(name)) db.exec(`ALTER TABLE envs ADD COLUMN ${name} ${type}`)
+  }
 }
 
 export function createSqliteStore(path: string): Store & { close(): void } {
@@ -76,17 +104,18 @@ export function createSqliteStore(path: string): Store & { close(): void } {
   // waiting, and the loser drops the tick entirely.
   db.exec('PRAGMA busy_timeout = 5000')
   db.exec(SCHEMA)
+  migrate(db)
 
   return {
     async create(rec) {
       db.prepare(
         `INSERT INTO envs (id, slug, owner_id, spec, state, url, host_port, internal_db_url,
-           internal_cache_url, created_at, expires_at, error, lease_holder, lease_expires_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           internal_cache_url, created_at, expires_at, reserved_until, error, lease_holder, lease_expires_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(
         rec.id, rec.slug, rec.ownerId, JSON.stringify(rec.spec), rec.state,
         rec.url ?? null, rec.hostPort ?? null, rec.internalDbUrl ?? null, rec.internalCacheUrl ?? null,
-        rec.createdAt, rec.expiresAt, rec.error ?? null,
+        rec.createdAt, rec.expiresAt, rec.reservedUntil ?? null, rec.error ?? null,
         rec.leaseHolder ?? null, rec.leaseExpiresAt ?? null,
       )
     },
@@ -120,7 +149,10 @@ export function createSqliteStore(path: string): Store & { close(): void } {
         const col = COLUMN[k]
         if (!col) continue
         sets.push(`${col} = ?`)
-        args.push(v === undefined ? null : v)
+        // spec is the one column that is not a scalar. Without this it would be
+        // bound as an object, which SQLite rejects -- or worse, silently stored
+        // as "[object Object]" by a driver that coerces.
+        args.push(col === 'spec' ? JSON.stringify(v) : v === undefined ? null : v)
       }
       if (!sets.length) return
       args.push(id)
@@ -159,7 +191,11 @@ export function createSqliteStore(path: string): Store & { close(): void } {
      *  until teardown finishes, and not counting them lets a burst overshoot. */
     async countActive(ownerId) {
       const row = db.prepare(
-        `SELECT COUNT(*) AS n FROM envs WHERE owner_id = ? AND state NOT IN ('failed','destroyed')`,
+        // 'reserved' excluded deliberately: a reservation holds a URL, not a
+        // slot. Counting it would make a queue of pending builds block the
+        // machine from running the tests those builds are for.
+        `SELECT COUNT(*) AS n FROM envs
+          WHERE owner_id = ? AND state NOT IN ('failed','destroyed','reserved')`,
       ).get(ownerId) as { n: number }
       return row.n
     },

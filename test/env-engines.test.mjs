@@ -11,7 +11,7 @@ import { fakeRuntime, fakeIngress, fakeImages } from './env-fakes.mjs'
 
 const CTX = { database: 'app', user: 'app', password: 'p4ss', rootPassword: 'r00t' }
 const P = { tokenId: 't', ownerId: 'o1', scopes: ['admin'] }
-const QUOTA = { maxConcurrentEnvs: 5, maxTtlSeconds: 3600, defaultTtlSeconds: 600, maxMemoryMbPerEnv: 1024 }
+const QUOTA = { maxConcurrentEnvs: 5, maxTtlSeconds: 3600, defaultTtlSeconds: 600, maxMemoryMbPerEnv: 1024, maxReservations: 20 }
 
 function harness() {
   const store = createSqliteStore(join(tmpdir(), `envcheck-eng-${randomUUID()}.db`))

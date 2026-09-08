@@ -114,7 +114,12 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
     if (!id) {
       if (method === 'POST') {
         d.tokens.require(who, 'envs:write');
-        const rec = await svc.provision(p, await readJson<EnvRequest>(req));
+        const body = await readJson<EnvRequest & { reservationSeconds?: number }>(req);
+        if (url.searchParams.get('reserve')) {
+          const held = await svc.reserve(p, body, body.reservationSeconds);
+          return send(res, 201, held);
+        }
+        const rec = await svc.provision(p, body, url.searchParams.get('envId') ?? undefined);
         d.audit.record({
           token: who.name, tokenId: who.id, action: 'POST /v1/envs', outcome: 'ok',
           remote, detail: { envId: rec.id, image: JSON.stringify(rec.spec.image).slice(0, 120) },

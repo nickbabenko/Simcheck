@@ -232,6 +232,65 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     ...(e.error ? { error: e.error } : {}),
   });
 
+  const ENV_INPUT = {
+    image: z.string().describe('Image tag the runtime can pull or already has, e.g. "layout-service:dev".'),
+    port: z.number().describe('Port the app listens on inside the container.'),
+    env: z.record(z.string(), z.string()).optional().describe('Extra environment variables for the app container.'),
+    database: z.enum(['postgres', 'mysql']).optional().describe('Attach a database and inject DATABASE_URL.'),
+    seedSql: z.string().optional().describe('SQL applied after the database is ready and BEFORE the app starts.'),
+    seedFile: z.string().optional().describe('Absolute path to a .sql file, or a pg_dump custom-format file.'),
+    cache: z.boolean().optional().describe('Attach Redis and inject REDIS_URL.'),
+    ttlSeconds: z.number().optional(),
+    memoryMb: z.number().optional(),
+  };
+
+  const toBody = (a: Record<string, unknown>) => {
+    const seedFile = a.seedFile as string | undefined;
+    const seed = a.seedSql ? { kind: 'sql', sql: a.seedSql }
+      : seedFile ? { kind: seedFile.endsWith('.sql') ? 'sqlFile' : 'dump', path: seedFile }
+      : undefined;
+    const engine = (a.database as string | undefined) ?? (seed ? 'postgres' : undefined);
+    return {
+      image: { kind: 'tag' as const, tag: a.image as string },
+      port: a.port as number,
+      ...(a.env ? { env: a.env as Record<string, string> } : {}),
+      ...(a.ttlSeconds ? { ttlSeconds: a.ttlSeconds as number } : {}),
+      ...(a.memoryMb ? { resources: { memoryMb: a.memoryMb as number } } : {}),
+      ...(engine ? { db: { engine, ...(seed ? { seed } : {}) } } : {}),
+      ...(a.cache ? { cache: { engine: 'redis' as const } } : {}),
+    };
+  };
+
+  server.registerTool('reserve_env', {
+    title: 'Reserve an environment URL without starting it',
+    description: [
+      'Allocate the URL now and start the containers later. Use this when something slow has to be told the',
+      'URL before the environment can usefully exist -- a cloud build that compiles it into the app, say.',
+      '',
+      'A reservation holds a URL, not a slot: it consumes no memory, counts nothing against the concurrency',
+      'limit, and does not start the environment TTL. That clock begins when you call provision_env.',
+      '',
+      'The shape this is for:',
+      '  reserve_env -> dispatch the build with the returned url -> provision_env with the same envId',
+      '  -> wait_for_env -> run_device_test',
+      '',
+      'Until it is provisioned the hostname resolves but answers 404, which is honest: it is not there yet.',
+      'Reservations expire on their own after an hour by default.',
+    ].join('\n'),
+    inputSchema: { ...ENV_INPUT, reservationSeconds: z.number().optional().describe('Default 3600.') },
+  }, async (a) => {
+    const rec = await client.reserveEnv({
+      ...toBody(a as Record<string, unknown>),
+      ...(a.reservationSeconds ? { reservationSeconds: a.reservationSeconds } : {}),
+    } as never);
+    return json({
+      envId: rec.id,
+      url: rec.url,
+      state: rec.state,
+      next: `Build with url "${rec.url}", then call provision_env with envId "${rec.id}".`,
+    });
+  });
+
   server.registerTool('provision_env', {
     title: 'Provision a disposable backend environment',
     description: [
@@ -249,30 +308,11 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       'The URL is unguessable but NOT authenticated. Do not put real credentials or production data behind it.',
     ].join('\n'),
     inputSchema: {
-      image: z.string().describe('Image tag the runtime can pull or already has, e.g. "myapi:dev" or "nginx:alpine".'),
-      port: z.number().describe('Port the app listens on inside the container.'),
-      env: z.record(z.string(), z.string()).optional().describe('Extra environment variables for the app container.'),
-      database: z.enum(['postgres', 'mysql']).optional().describe('Attach a database and inject DATABASE_URL.'),
-      seedSql: z.string().optional().describe('SQL applied after the database is ready and BEFORE the app starts.'),
-      seedFile: z.string().optional().describe('Absolute path to a .sql file, or a pg_dump custom-format file.'),
-      cache: z.boolean().optional().describe('Attach Redis and inject REDIS_URL.'),
-      ttlSeconds: z.number().optional(),
-      memoryMb: z.number().optional(),
+      ...ENV_INPUT,
+      envId: z.string().optional().describe('Materialise a reservation from reserve_env, keeping its URL.'),
     },
   }, async (a) => {
-    const seed = a.seedSql ? { kind: 'sql', sql: a.seedSql }
-      : a.seedFile ? { kind: a.seedFile.endsWith('.sql') ? 'sqlFile' : 'dump', path: a.seedFile }
-      : undefined;
-    const engine = a.database ?? (seed ? 'postgres' : undefined);
-    const rec = await client.provisionEnv({
-      image: { kind: 'tag', tag: a.image },
-      port: a.port,
-      ...(a.env ? { env: a.env } : {}),
-      ...(a.ttlSeconds ? { ttlSeconds: a.ttlSeconds } : {}),
-      ...(a.memoryMb ? { resources: { memoryMb: a.memoryMb } } : {}),
-      ...(engine ? { db: { engine, ...(seed ? { seed } : {}) } } : {}),
-      ...(a.cache ? { cache: { engine: 'redis' as const } } : {}),
-    });
+    const rec = await client.provisionEnv(toBody(a as Record<string, unknown>) as never, a.envId);
     return json({ ...envView(rec), next: `Call wait_for_env with envId "${rec.id}".` });
   });
 

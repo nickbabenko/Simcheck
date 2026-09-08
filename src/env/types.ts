@@ -6,6 +6,11 @@
  *  container must not start until the database has been seeded, or it races its
  *  own migrations against an empty schema and fails intermittently. */
 export type EnvState =
+  /** A URL is allocated and nothing else. Costs a row and 80 bits of entropy,
+   *  holds no containers, and deliberately does NOT count against the
+   *  concurrency quota -- the whole point is to hand a build its URL before
+   *  anything is running, while CI takes its minutes. */
+  | 'reserved'
   | 'pending'
   | 'provisioning'
   | 'seeding'
@@ -98,7 +103,17 @@ export interface EnvRecord {
   internalDbUrl?: string
   internalCacheUrl?: string
   createdAt: number
+  /** Runtime lifetime. Starts when the environment is *provisioned*, not when
+   *  it was reserved, so a long cloud build does not eat the test's window. */
   expiresAt: number
+  /**
+   * When an unprovisioned reservation is given up.
+   *
+   * Separate from expiresAt and much more generous, because a reservation costs
+   * nothing to hold. One clock would force a choice between "long enough for CI"
+   * and "short enough not to strand containers"; two clocks need no compromise.
+   */
+  reservedUntil?: number | undefined
   /** Set when state is `failed`. Surfaced to the caller verbatim — a provisioning
    *  failure the caller cannot read is a support ticket. */
   error?: string
@@ -108,6 +123,9 @@ export interface EnvRecord {
 }
 
 export interface Quota {
+  /** Reservations are cheap but not free -- a runaway loop should not be able
+   *  to fill the table. They expire on their own; this is only a backstop. */
+  maxReservations: number
   maxConcurrentEnvs: number
   maxTtlSeconds: number
   defaultTtlSeconds: number

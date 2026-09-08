@@ -102,6 +102,14 @@ export interface RuntimeDriver {
  * slug.
  */
 export interface IngressDriver {
+  /**
+   * The URL a slug will be published at, without publishing it.
+   *
+   * Needed so a reservation can hand out its URL before anything is running.
+   * Until attach() is called the hostname resolves but the proxy answers 404,
+   * which is the honest response: the environment genuinely is not there yet.
+   */
+  urlFor(slug: string): string
   /** Idempotent. Returns the externally reachable URL. */
   attach(slug: string, upstream: { host: string; port: number }): Promise<string>
   /** Idempotent: detaching an unknown slug must succeed. */

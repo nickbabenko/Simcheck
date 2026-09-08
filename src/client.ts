@@ -119,8 +119,14 @@ export class Client {
 
   /* --------------------------------------------------------- environments */
 
-  provisionEnv(body: EnvRequestBody): Promise<EnvView> {
-    return this.call('POST', '/v1/envs', body);
+  /** Allocate a URL without starting anything. */
+  reserveEnv(body: EnvRequestBody & { reservationSeconds?: number }): Promise<EnvView> {
+    return this.call('POST', '/v1/envs?reserve=1', body);
+  }
+
+  /** Provision fresh, or materialise a reservation by passing its envId. */
+  provisionEnv(body: EnvRequestBody, envId?: string): Promise<EnvView> {
+    return this.call('POST', envId ? `/v1/envs?envId=${encodeURIComponent(envId)}` : '/v1/envs', body);
   }
 
   listEnvs(): Promise<EnvView[]> {

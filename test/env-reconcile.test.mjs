@@ -10,7 +10,7 @@ import { fakeRuntime, fakeIngress, fakeImages } from './env-fakes.mjs'
 
 const P = { tokenId: 't', ownerId: 'o1', scopes: ['admin'] }
 
-const QUOTA = { maxConcurrentEnvs: 2, maxTtlSeconds: 3600, defaultTtlSeconds: 600, maxMemoryMbPerEnv: 1024 }
+const QUOTA = { maxConcurrentEnvs: 2, maxTtlSeconds: 3600, defaultTtlSeconds: 600, maxMemoryMbPerEnv: 1024, maxReservations: 20 }
 const OPTS = {
   holder: 'test', leaseMs: 60_000, tickMs: 1000,
   minFreeDiskGb: 1, minFreeMemoryMb: 128, provisionTimeoutMs: 5000,

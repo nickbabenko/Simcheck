@@ -61,6 +61,7 @@ export function createEnvSubsystem(cfg: Config, home: string): EnvSubsystem {
     maxTtlSeconds: cfg.envMaxTtlSeconds,
     defaultTtlSeconds: cfg.envDefaultTtlSeconds,
     maxMemoryMbPerEnv: cfg.envMaxMemoryMb,
+    maxReservations: cfg.envMaxReservations,
   });
 
   const reconciler = createReconciler(drivers, {

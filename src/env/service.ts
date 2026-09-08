@@ -19,12 +19,26 @@ import { packContext } from './context.js'
 import { NotFoundError, QuotaError } from './errors.js'
 export { NotFoundError, QuotaError } from './errors.js'
 
+/** An hour: long enough for any cloud build, short enough that a forgotten
+ *  reservation does not linger. Costs a row either way. */
+const DEFAULT_RESERVATION_SECONDS = 3600
+
 /** The caller describes what it wants; it does not get to say whose it is.
  *  ownerId comes from the token, or one tenant could provision into another. */
 export type EnvRequest = Omit<EnvSpec, 'ownerId'>
 
 export interface Service {
-  provision(p: Principal, req: EnvRequest): Promise<EnvRecord>
+  /**
+   * Allocate a URL and nothing else.
+   *
+   * For the case where something slow has to be told the URL before the
+   * environment can usefully exist -- a cloud build that bakes it in, and takes
+   * minutes doing it. Provisioning first would burn the runtime TTL and hold a
+   * concurrency slot for the whole build, so a reservation holds neither.
+   */
+  reserve(p: Principal, req: EnvRequest, reservationSeconds?: number): Promise<EnvRecord>
+  /** Provision fresh, or materialise a reservation by passing its envId. */
+  provision(p: Principal, req: EnvRequest, envId?: string): Promise<EnvRecord>
   get(p: Principal, id: string): Promise<EnvRecord>
   list(p: Principal): Promise<EnvRecord[]>
   extend(p: Principal, id: string, seconds: number): Promise<EnvRecord>
@@ -57,7 +71,36 @@ export function createService(d: Drivers, quota: Quota): Service {
   }
 
   return {
-    async provision(p, req) {
+    async reserve(p, req, reservationSeconds) {
+      requireScope(p, 'env:write')
+      // Deliberately no countActive check: a reservation is not a slot. If it
+      // counted, a queue of builds waiting on CI would block the machine from
+      // running the very tests those builds are for.
+      const held = (await d.store.list({ ownerId: p.ownerId, states: ['reserved'] })).length
+      if (held >= quota.maxReservations) {
+        throw new QuotaError(`holding ${held} reservations, limit is ${quota.maxReservations}`)
+      }
+      const now = Date.now()
+      const until = now + (reservationSeconds ?? DEFAULT_RESERVATION_SECONDS) * 1000
+      const slug = newSlug()
+      const rec: EnvRecord = {
+        id: randomUUID(),
+        slug,
+        ownerId: p.ownerId,
+        spec: { ...req, ownerId: p.ownerId },
+        state: 'reserved',
+        url: d.ingress.urlFor(slug),
+        createdAt: now,
+        // Mirrors reservedUntil so any generic expiry logic behaves sensibly;
+        // the real runtime clock is set when it is provisioned.
+        expiresAt: until,
+        reservedUntil: until,
+      }
+      await d.store.create(rec)
+      return rec
+    },
+
+    async provision(p, req, envId) {
       requireScope(p, 'env:write')
       const active = await d.store.countActive(p.ownerId)
       if (active >= quota.maxConcurrentEnvs) {
@@ -71,6 +114,30 @@ export function createService(d: Drivers, quota: Quota): Service {
       }
 
       const now = Date.now()
+
+      // Materialising a reservation: keep its id and slug, because the URL has
+      // already been handed out and possibly compiled into a build.
+      if (envId) {
+        const held = await owned(p, envId)
+        if (held.state !== 'reserved') {
+          throw new Error(`env ${envId} is ${held.state}, not a reservation`)
+        }
+        const started: EnvRecord = {
+          ...held,
+          spec: { ...req, ownerId: p.ownerId, ttlSeconds: ttl },
+          state: 'pending',
+          expiresAt: now + ttl * 1000,
+          reservedUntil: undefined,
+        }
+        await d.store.update(envId, {
+          state: 'pending',
+          expiresAt: started.expiresAt,
+          reservedUntil: undefined,
+          spec: started.spec,
+        })
+        return started
+      }
+
       const rec: EnvRecord = {
         id: randomUUID(),
         slug: newSlug(),

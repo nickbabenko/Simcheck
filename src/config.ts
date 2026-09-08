@@ -158,6 +158,9 @@ export interface Config {
   /** Deliberately low. Each environment competes with the simulator pool for
    *  the same RAM on this one Mac. */
   envMaxConcurrent: number;
+  /** Reservations hold a URL, not a slot, so this is far higher than
+   *  envMaxConcurrent -- it is only a backstop against a runaway loop. */
+  envMaxReservations: number;
   envDefaultTtlSeconds: number;
   envMaxTtlSeconds: number;
   envMaxMemoryMb: number;
@@ -224,6 +227,7 @@ const DEFAULTS: Config = {
   envTlsKey: '',
   envRegistry: '',
   envMaxConcurrent: 2,
+  envMaxReservations: 20,
   envDefaultTtlSeconds: 900,
   envMaxTtlSeconds: 14400,
   envMaxMemoryMb: 1024,
@@ -235,7 +239,7 @@ const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'p
 const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision', 'envEnabled']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
   'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb',
-  'androidBootTimeoutMs', 'envMaxConcurrent', 'envDefaultTtlSeconds', 'envMaxTtlSeconds',
+  'androidBootTimeoutMs', 'envMaxConcurrent', 'envMaxReservations', 'envDefaultTtlSeconds', 'envMaxTtlSeconds',
   'envMaxMemoryMb', 'envMinFreeMemoryMb', 'envProvisionTimeoutMs']);
 
 /** Precedence: env > ~/.simcheck/config.json > defaults. */

@@ -8,7 +8,7 @@ import { createService } from '../dist/env/service.js'
 import { createReconciler } from '../dist/env/reconcile.js'
 import { fakeRuntime, fakeIngress, fakeImages } from './env-fakes.mjs'
 
-const QUOTA = { maxConcurrentEnvs: 20, maxTtlSeconds: 3600, defaultTtlSeconds: 600, maxMemoryMbPerEnv: 1024 }
+const QUOTA = { maxConcurrentEnvs: 20, maxTtlSeconds: 3600, defaultTtlSeconds: 600, maxMemoryMbPerEnv: 1024, maxReservations: 20 }
 const P = { tokenId: 't', ownerId: 'o1', scopes: ['admin'] }
 const spec = () => ({ image: { kind: 'tag', tag: 'app:1' }, port: 8080 })
 

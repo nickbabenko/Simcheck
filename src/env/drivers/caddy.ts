@@ -120,7 +120,16 @@ export function createCaddyIngress(opts: CaddyOptions) {
     })
   }
 
+  function urlFor(slug: string): string {
+    const scheme = opts.tls ? 'https' : 'http'
+    const port = listen[0]?.replace(/^.*:/, '') ?? '80'
+    const suffix = port === '80' || port === '443' ? '' : `:${port}`
+    return `${scheme}://${slug}.${opts.baseDomain}${suffix}`
+  }
+
   return {
+    urlFor,
+
     async attach(slug: string, upstream: { host: string; port: number }): Promise<string> {
       await ensureServer()
       const hostname = `${slug}.${opts.baseDomain}`
@@ -135,10 +144,7 @@ export function createCaddyIngress(opts: CaddyOptions) {
         handle: [{ handler: 'reverse_proxy', upstreams: [{ dial: `${upstream.host}:${upstream.port}` }] }],
         terminal: true,
       })
-      const scheme = opts.tls ? 'https' : 'http'
-      const port = listen[0]?.replace(/^.*:/, '') ?? '80'
-      const suffix = port === '80' || port === '443' ? '' : `:${port}`
-      return `${scheme}://${hostname}${suffix}`
+      return urlFor(slug)
     },
 
     async detach(slug: string): Promise<void> {
@@ -167,6 +173,9 @@ export function createCaddyIngress(opts: CaddyOptions) {
 export function createNullIngress() {
   const seen = new Map<string, string>()
   return {
+    // Without a proxy there is no hostname to hand out ahead of time; the real
+    // address is only known once a port has been published.
+    urlFor(slug: string): string { return seen.get(slug) ?? `http://127.0.0.1/(unrouted:${slug})` },
     async attach(slug: string, upstream: { host: string; port: number }): Promise<string> {
       const url = `http://${upstream.host}:${upstream.port}`
       seen.set(slug, url)
