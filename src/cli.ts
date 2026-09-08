@@ -16,6 +16,7 @@ const USAGE = `simcheck - hand off iOS simulator and Android emulator testing
 
   simcheck start [--foreground]     start the daemon (launchd by default)
   simcheck stop                     stop the daemon
+  simcheck restart                  restart everything running this build
   simcheck status                   daemon health and pool state
   simcheck logs [-f]                tail the daemon log
 
@@ -80,6 +81,7 @@ async function main(): Promise<void> {
   switch (cmd) {
     case 'start':   return start();
     case 'stop':    return stop();
+    case 'restart': return restart();
     case 'status':  return status();
     case 'logs':    return logs();
     case 'submit':  return submit();
@@ -119,6 +121,15 @@ function need(index: number, what: string): string {
 const print = (v: unknown) => console.log(JSON.stringify(v, null, 2));
 
 const PLIST_LABEL = 'com.nickbabenko.simcheck';
+/**
+ * Agents running this repo's compiled code, so a rebuild leaves them stale.
+ *
+ * The daemon is obvious. The remote MCP server is the one that catches people
+ * out: it is long-lived, so unlike the stdio server -- which a client spawns
+ * fresh every connection -- it keeps serving whatever tool list it started with
+ * until something restarts it.
+ */
+const CODE_LABELS = [PLIST_LABEL, 'com.nickbabenko.simcheck-remote'];
 const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
 
 async function start(): Promise<void> {
@@ -135,6 +146,22 @@ async function start(): Promise<void> {
   await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath], true);
   await launchctl(['kickstart', '-k', `gui/${process.getuid?.() ?? 501}/${PLIST_LABEL}`]);
   console.log('daemon starting; run `simcheck status` in a few seconds');
+}
+
+/** Restart everything running this repo's code. The thing to run after a build. */
+async function restart(): Promise<void> {
+  const uid = process.getuid?.() ?? 501;
+  for (const label of CODE_LABELS) {
+    const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+    if (!fs.existsSync(plist)) continue;      // not installed; nothing to restart
+    await launchctl(['bootstrap', `gui/${uid}`, plist], true);
+    await launchctl(['kickstart', '-k', `gui/${uid}/${label}`], true);
+    console.log(`restarted ${label}`);
+  }
+  // Caddy and the container runtime are deliberately left alone: they are not
+  // ours, and bouncing the proxy would drop every live environment's route for
+  // no reason when all that changed is our code.
+  console.log('run `simcheck status` in a few seconds');
 }
 
 async function stop(): Promise<void> {
@@ -155,7 +182,61 @@ function launchctl(argv: string[], tolerant = false): Promise<void> {
   });
 }
 
+/**
+ * Started before the code it runs was built?
+ *
+ * Silent staleness is the worst kind: the tool list a client sees simply lacks
+ * whatever was added, with no error anywhere to explain it. Cheaper to notice
+ * here than to debug from the other end.
+ */
+const PS_SECOND_TRUNCATION_MS = 2000;
+
+async function staleAgents(): Promise<string[]> {
+  const built = fs.statSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'mcp-server.js')).mtimeMs;
+  const stale: string[] = [];
+  for (const label of CODE_LABELS) {
+    const pid = await launchctlPid(label);
+    if (!pid) continue;
+    const started = await processStart(pid);
+    // `ps` reports whole seconds, so a process started at .400 reads back as
+    // .000 -- enough to look older than a build that finished at .157 in the
+    // same second, and report a freshly restarted agent as stale forever.
+    if (started !== undefined && started < built - PS_SECOND_TRUNCATION_MS) stale.push(label);
+  }
+  return stale;
+}
+
+function launchctlPid(label: string): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn('launchctl', ['list'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (d) => { out += String(d); });
+    child.on('close', () => {
+      const line = out.split('\n').find((l) => l.endsWith(`\t${label}`) || l.split('\t')[2] === label);
+      const pid = Number(line?.split('\t')[0]);
+      resolve(Number.isFinite(pid) && pid > 0 ? pid : undefined);
+    });
+    child.on('error', () => resolve(undefined));
+  });
+}
+
+function processStart(pid: number): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn('ps', ['-o', 'lstart=', '-p', String(pid)], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (d) => { out += String(d); });
+    child.on('close', () => {
+      const t = Date.parse(out.trim());
+      resolve(Number.isNaN(t) ? undefined : t);
+    });
+    child.on('error', () => resolve(undefined));
+  });
+}
+
 async function status(): Promise<void> {
+  for (const label of await staleAgents()) {
+    console.warn(`warning: ${label} started before the current build -- it is serving stale code. Run: simcheck restart`);
+  }
   const health = await client.health().catch(() => null);
   if (!health) {
     console.log(`daemon:  DOWN (${baseUrl(cfg)})`);
@@ -520,7 +601,7 @@ async function tunnel(): Promise<void> {
     edgeAllowLoopback: true,
   }, null, 2).split('\n').map((l) => '     ' + l).join('\n'));
   console.log('');
-  console.log('  7. simcheck stop && simcheck start && simcheck doctor');
+  console.log('  7. simcheck restart && simcheck doctor');
   console.log('');
   console.log('  8. Mint a matching token for the far side:');
   console.log('       simcheck token create cloud --preset remote');

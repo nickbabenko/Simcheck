@@ -171,7 +171,7 @@ else
     warn "environments are off by default. To enable, add to $HARNESS_HOME/config.json:"
     echo '          "envEnabled": true,'
     echo "          \"envDockerHost\": \"$ENV_RUNTIME\""
-    echo "        then: simcheck stop && simcheck start && simcheck doctor"
+    echo "        then: simcheck restart && simcheck doctor"
   fi
   # https needs a WILDCARD certificate: a per-name one is published to
   # Certificate Transparency logs within seconds, which would make every
@@ -436,6 +436,6 @@ The pool warms in the background; the first simulator takes about a minute to
 boot. Natural-language scenarios work out of the box through your Claude Code
 login, but are much cheaper and faster with an API key:
 
-  echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc && simcheck stop && simcheck start
+  echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc && simcheck restart
 
 DONE
