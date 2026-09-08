@@ -48,6 +48,11 @@ if [ "$UNINSTALL" = 1 ]; then
   rm -f "$BINDIR/simcheck" "$BINDIR/simcheck-mcp" && ok "symlinks removed"
   rm -rf "$SKILLDIR" && ok "skill removed"
   command -v claude >/dev/null && { claude mcp remove simcheck --scope user >/dev/null 2>&1 || true; ok "MCP entry removed"; }
+  for extra in com.nickbabenko.simcheck-caddy com.nickbabenko.simcheck-podman; do
+    launchctl bootout "gui/$(id -u)/$extra" 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/$extra.plist"
+  done
+  ok "environment support agents removed"
   # Containers are not ours to reap on uninstall: a running environment may be
   # holding data someone is mid-way through using. The daemon's own reaper
   # handles them, and `simcheck` gone means it will not start new ones.
@@ -173,6 +178,77 @@ else
   # environment hostname publicly enumerable.
   echo "        A real device needs https -- issue a *.<envBaseDomain> wildcard"
   echo "        (never per-name) and set envTlsCert / envTlsKey."
+fi
+
+# ------------------------------------------- environment support services --
+# Environments need a container runtime and a proxy, and neither survives a
+# reboot on its own. Without these two agents, environments fail after every
+# restart with "no Caddy admin API" -- which reads like a bug in the harness
+# rather than a service that simply is not running.
+if [ -n "$ENV_RUNTIME" ] && command -v caddy >/dev/null; then
+  say "Installing environment support agents"
+
+  CADDY_LABEL="com.nickbabenko.simcheck-caddy"
+  CADDY_PLIST="$HOME/Library/LaunchAgents/$CADDY_LABEL.plist"
+  cat > "$CADDY_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$CADDY_LABEL</string>
+  <!-- No config file on purpose: routes are pushed in through the admin API as
+       environments come and go. A Caddyfile would be rewritten constantly and
+       one bad reload would take every route down at once. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(command -v caddy)</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HARNESS_HOME/caddy.log</string>
+  <key>StandardErrorPath</key><string>$HARNESS_HOME/caddy.log</string>
+</dict>
+</plist>
+PLIST
+  launchctl bootout "gui/$(id -u)/$CADDY_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$CADDY_PLIST"
+  ok "caddy agent loaded ($CADDY_LABEL)"
+
+  # Only podman needs starting; OrbStack and Docker Desktop are apps that
+  # restore themselves at login.
+  if command -v podman >/dev/null && podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then
+    PODMAN_LABEL="com.nickbabenko.simcheck-podman"
+    PODMAN_PLIST="$HOME/Library/LaunchAgents/$PODMAN_LABEL.plist"
+    cat > "$PODMAN_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$PODMAN_LABEL</string>
+  <!-- One shot, not KeepAlive: the VM keeps itself running, and "already
+       running" is a non-zero exit that would make launchd restart it forever. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>$(command -v podman) machine start || true</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <!-- podman machine start spawns gvproxy and vfkit and returns. Without this,
+       launchd reaps the whole process group when the job exits and the VM dies
+       moments after reporting "started successfully". -->
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>$HARNESS_HOME/podman.log</string>
+  <key>StandardErrorPath</key><string>$HARNESS_HOME/podman.log</string>
+</dict>
+</plist>
+PLIST
+    launchctl bootout "gui/$(id -u)/$PODMAN_LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$PODMAN_PLIST"
+    ok "podman machine agent loaded ($PODMAN_LABEL)"
+  fi
 fi
 
 # ------------------------------------------------------------------- build --

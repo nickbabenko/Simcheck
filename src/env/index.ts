@@ -74,6 +74,7 @@ export function createEnvSubsystem(cfg: Config, home: string): EnvSubsystem {
     minFreeMemoryMb: cfg.envMinFreeMemoryMb,
     provisionTimeoutMs: cfg.envProvisionTimeoutMs,
     onError: (envId, err) => log.error(`reconcile ${envId}`, String(err)),
+    onNotice: (message) => log.warn(message),
   });
 
   return { drivers, service, reconciler };

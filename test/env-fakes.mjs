@@ -6,9 +6,13 @@ export function fakeRuntime(opts = {}) {
   const envs = new Map()          // envId -> Set of roles
   const calls = []
   let capacity = { freeMemoryMb: 8192, freeDiskGb: 100, runningEnvs: 0 }
+  let unreachable = false
+  const stopped = new Set()
   return {
     calls,
     setCapacity(c) { capacity = { ...capacity, ...c } },
+    /** Simulate the container runtime being down, not merely empty. */
+    setUnreachable(v) { unreachable = v },
     /** Simulate containers appearing without the store knowing. */
     injectOrphan(envId) { envs.set(envId, new Set(['app'])) },
     async createNetwork(envId) { envs.set(envId, envs.get(envId) ?? new Set()); return `net-${envId}` },
@@ -22,8 +26,17 @@ export function fakeRuntime(opts = {}) {
     async exec() { return { exitCode: 0, stdout: '', stderr: '' } },
     async putFile() {},
     async logs() { return 'logs' },
-    async destroy(envId) { envs.delete(envId); calls.push(`destroy:${envId}`) },
-    async listEnvIds() { return [...envs.keys()] },
+    async destroy(envId) { envs.delete(envId); stopped.delete(envId); calls.push(`destroy:${envId}`) },
+    /** Simulate a host restart: containers survive but stop. */
+    stopAll() { for (const id of envs.keys()) stopped.add(id) },
+    async runningEnvIds() {
+      if (unreachable) throw new Error('connect ENOENT /var/run/docker.sock')
+      return [...envs.keys()].filter((id) => !stopped.has(id))
+    },
+    async listEnvIds() {
+      if (unreachable) throw new Error('connect ENOENT /var/run/docker.sock')
+      return [...envs.keys()]
+    },
     async capacity() { return { ...capacity, runningEnvs: envs.size } },
   }
 }

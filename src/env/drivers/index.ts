@@ -78,8 +78,17 @@ export interface RuntimeDriver {
   logs(envId: string, opts?: { role?: string; tail?: number }): Promise<string>
   /** Idempotent: destroying an env that is already gone must succeed. */
   destroy(envId: string): Promise<void>
-  /** Enumerated from container labels — the reconciler's view of reality. */
+  /** Every env the runtime knows of, running or not. Used to spot orphans. */
   listEnvIds(): Promise<string[]>
+  /**
+   * Envs whose containers are actually running.
+   *
+   * Distinct from listEnvIds because a stopped container is still a container:
+   * restarting the container host leaves every one of them present but dead, so
+   * presence is not liveness and an env checked the lenient way would keep
+   * advertising a URL that refuses connections.
+   */
+  runningEnvIds(): Promise<string[]>
   capacity(): Promise<Capacity>
 }
 

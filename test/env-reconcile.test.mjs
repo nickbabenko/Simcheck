@@ -108,3 +108,100 @@ test('ttl is capped at the configured maximum', async () => {
   const env = await h.service.provision(P, spec({ ttlSeconds: 999_999 }))
   assert.equal(env.spec.ttlSeconds, QUOTA.maxTtlSeconds)
 })
+
+test('a ready env whose containers vanished is failed, not left advertising a dead URL', async () => {
+  // The reboot case: the container runtime restarts and takes every container
+  // with it. Without this the env sits in `ready` until its TTL, and the only
+  // symptom a caller sees is connection refused.
+  const h = harness()
+  const env = await h.service.provision(P, spec())
+  await h.rec.tick(Date.now())
+  assert.equal((await h.store.get(env.id)).state, 'ready')
+
+  await h.runtime.destroy(env.id)          // as a runtime restart would
+  await h.rec.tick(Date.now())
+
+  const got = await h.store.get(env.id)
+  assert.equal(got.state, 'failed')
+  assert.match(got.error, /no longer running/)
+})
+
+test('a vanished env does not get its route restored', async () => {
+  // Re-attaching from the pre-update list is how a dead URL stays published.
+  const h = harness()
+  const env = await h.service.provision(P, spec())
+  await h.rec.tick(Date.now())
+  const slug = (await h.store.get(env.id)).slug
+
+  await h.runtime.destroy(env.id)
+  h.ingress.routes.clear()                 // proxy restarted too
+  await h.rec.tick(Date.now())
+
+  assert.equal(h.ingress.routes.has(slug), false, 'must not republish a dead environment')
+})
+
+test('an unreachable runtime does not mark working envs failed', async () => {
+  // "The containers are gone" and "I cannot ask" look identical from here.
+  // Marking envs failed on a transient socket blip would destroy working ones.
+  const h = harness()
+  const env = await h.service.provision(P, spec())
+  await h.rec.tick(Date.now())
+  assert.equal((await h.store.get(env.id)).state, 'ready')
+
+  h.runtime.setUnreachable(true)
+  await h.rec.tick(Date.now())
+  assert.equal((await h.store.get(env.id)).state, 'ready', 'must not fail an env it cannot see')
+
+  h.runtime.setUnreachable(false)
+  await h.rec.tick(Date.now())
+  assert.equal((await h.store.get(env.id)).state, 'ready', 'and must not fail it once back either')
+})
+
+test('expiry still runs while the runtime is unreachable', async () => {
+  // Expiry is bookkeeping; wedging it behind a runtime outage means nothing
+  // ages out until the runtime returns.
+  const h = harness()
+  const env = await h.service.provision(P, spec({ ttlSeconds: 1 }))
+  await h.rec.tick(Date.now())
+  h.runtime.setUnreachable(true)
+  await h.rec.tick(Date.now() + 5000)
+  assert.notEqual((await h.store.get(env.id)).state, 'ready', 'expiry must not be blocked by the runtime')
+})
+
+test('a runtime outage is announced once, not once per tick', async () => {
+  // A two-second error loop buries the log it is written into.
+  const notices = []
+  const store = createSqliteStore(join(tmpdir(), `envcheck-rec-${randomUUID()}.db`))
+  const runtime = fakeRuntime()
+  const d = { store, runtime, ingress: fakeIngress(), images: fakeImages() }
+  const rec = createReconciler(d, { ...OPTS, onNotice: (m) => notices.push(m) })
+
+  runtime.setUnreachable(true)
+  for (let i = 0; i < 5; i++) await rec.tick(Date.now())
+  assert.equal(notices.length, 1, `expected one notice, got ${notices.length}`)
+  assert.match(notices[0], /unreachable/)
+
+  runtime.setUnreachable(false)
+  for (let i = 0; i < 3; i++) await rec.tick(Date.now())
+  assert.equal(notices.length, 2)
+  assert.match(notices[1], /reachable again/)
+})
+
+test('a ready env whose containers are merely STOPPED is failed too', async () => {
+  // The actual reboot case. Restarting the container host leaves every
+  // container present but dead, so a presence check would call this healthy and
+  // keep publishing a URL that refuses connections.
+  const h = harness()
+  const env = await h.service.provision(P, spec())
+  await h.rec.tick(Date.now())
+  const slug = (await h.store.get(env.id)).slug
+  assert.equal((await h.store.get(env.id)).state, 'ready')
+
+  h.runtime.stopAll()                       // containers still exist, not running
+  await h.rec.tick(Date.now())
+
+  const got = await h.store.get(env.id)
+  assert.equal(got.state, 'failed')
+  assert.match(got.error, /no longer running/)
+  assert.equal(h.ingress.routes.has(slug), false, 'its route must be withdrawn')
+})

@@ -195,6 +195,14 @@ export function createDockerRuntime(opts: DockerRuntimeOptions): RuntimeDriver {
       for (const n of nets) await d.raw('DELETE', `/networks/${n.Id}`)
     },
 
+    async runningEnvIds() {
+      // No all=true: the daemon then returns only running containers.
+      const list = await d.json<Array<{ Labels: Record<string, string> }>>(
+        'GET', `/containers/json?filters=${labelFilter()}`,
+      )
+      return [...new Set(list.map((c) => c.Labels[ENV_LABEL]).filter((v): v is string => Boolean(v)))]
+    },
+
     async listEnvIds() {
       const list = await d.json<Array<{ Labels: Record<string, string> }>>(
         'GET', `/containers/json?all=true&filters=${labelFilter()}`,

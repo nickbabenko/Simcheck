@@ -22,6 +22,8 @@ export interface ReconcilerOptions {
   minFreeMemoryMb: number
   provisionTimeoutMs: number
   onError?: (envId: string, err: unknown) => void
+  /** Notable transitions worth one log line, not one per tick. */
+  onNotice?: (message: string) => void
 }
 
 export interface Reconciler {
@@ -38,6 +40,9 @@ const IN_PROGRESS = new Set(['pending', 'provisioning', 'seeding'])
 
 export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconciler {
   let timer: NodeJS.Timeout | undefined
+  // Latched so an outage logs once on the way down and once on the way back,
+  // rather than every tick. A two-second error loop buries the log it is in.
+  let runtimeDown = false
   let running = false
   let stopped = false
 
@@ -130,20 +135,67 @@ export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconcile
    * unreachable while still reporting itself ready.
    */
   async function collectOrphans(): Promise<void> {
-    const live = (await d.store.list()).filter((r) => r.state !== 'destroyed' && r.state !== 'failed')
-    const knownIds = new Set(live.map((r) => r.id))
-    for (const envId of await d.runtime.listEnvIds()) {
-      if (!knownIds.has(envId)) await d.runtime.destroy(envId)
+    const all = (await d.store.list()).filter((r) => r.state !== 'destroyed' && r.state !== 'failed');
+
+    // Everything below is derived from what the runtime reports. If it cannot
+    // be reached, we cannot tell "the containers are gone" from "we cannot ask"
+    // -- and marking environments failed on a transient socket blip would
+    // destroy working ones. So: leave all state alone and try again next tick.
+    // Expiry bookkeeping has already run by this point and is unaffected.
+    let alive: Set<string>;
+    let running: Set<string>;
+    try {
+      alive = new Set(await d.runtime.listEnvIds());
+      running = new Set(await d.runtime.runningEnvIds());
+      if (runtimeDown) {
+        runtimeDown = false;
+        opts.onNotice?.('container runtime is reachable again');
+      }
+    } catch (err) {
+      if (!runtimeDown) {
+        runtimeDown = true;
+        opts.onNotice?.(`container runtime is unreachable (${(err as Error).message}); ` +
+          'leaving environment state untouched until it returns');
+      }
+      return;
     }
 
-    const attached = new Set(await d.ingress.listSlugs())
-    const knownSlugs = new Set(live.map((r) => r.slug))
-    for (const slug of attached) {
-      if (!knownSlugs.has(slug)) await d.ingress.detach(slug)
+    // A ready environment the runtime does not know about -- the usual cause is
+    // a host reboot, which takes every container with it. Left alone it would
+    // sit in `ready` advertising a dead URL until its TTL ran out, and the
+    // caller's only symptom would be connection refused.
+    // Checked against *running*, not merely present: stopping the container
+    // host leaves every container in place but dead, which is exactly what a
+    // reboot does and exactly what this needs to catch.
+    const vanished = all.filter((r) => r.state === 'ready' && !running.has(r.id));
+    for (const rec of vanished) {
+      await d.store.update(rec.id, {
+        state: 'failed',
+        error: 'containers are no longer running (the container host restarted); provision a new environment',
+      });
     }
+
+    // Work on what is still genuinely live. Reusing the pre-update list would
+    // re-attach a route for an environment just marked failed, which is how a
+    // dead URL stays published.
+    const gone = new Set(vanished.map((r) => r.id));
+    const live = all.filter((r) => !gone.has(r.id));
+    const knownIds = new Set(live.map((r) => r.id));
+    for (const envId of alive) {
+      if (!knownIds.has(envId)) await d.runtime.destroy(envId);
+    }
+
+    const attached = new Set(await d.ingress.listSlugs());
+    const knownSlugs = new Set(live.map((r) => r.slug));
+    for (const slug of attached) {
+      if (!knownSlugs.has(slug)) await d.ingress.detach(slug);
+    }
+    // Restoring routes matters as much as removing them: a proxy restart drops
+    // every route it held, and without this each running environment would go
+    // quietly unreachable while still reporting itself ready.
     for (const rec of live) {
       if (rec.state === 'ready' && rec.hostPort && !attached.has(rec.slug)) {
-        await d.ingress.attach(rec.slug, { host: '127.0.0.1', port: rec.hostPort })
+        await d.ingress.attach(rec.slug, { host: '127.0.0.1', port: rec.hostPort });
       }
     }
   }
