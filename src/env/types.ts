@@ -70,11 +70,36 @@ export interface Resources {
   cpus?: number
 }
 
+/** One service within an environment. */
+export interface ServiceSpec {
+  image: ImageRef
+  /** Container port this service listens on. */
+  port: number
+  env?: Record<string, string>
+  resources?: Resources
+  /**
+   * The service that keeps the bare `<slug>` hostname; the others get
+   * `<slug>-<name>`.
+   *
+   * That naming is not cosmetic. A wildcard certificate covers exactly one
+   * label, so `*.env.example.com` matches `abc123-admin.env.example.com` but
+   * NOT `admin.abc123.env.example.com`. The nested form works fine over plain
+   * http and then fails TLS the first time a real device points at it.
+   */
+  primary?: boolean
+}
+
 /** What the caller asks for. */
 export interface EnvSpec {
-  image: ImageRef
-  /** Container port the app listens on. Ingress targets this. */
-  port: number
+  /** Single-service shorthand. Equivalent to one service named "app". */
+  image?: ImageRef
+  port?: number
+  /**
+   * Several services sharing one database, one cache and one network, so they
+   * reach each other by name. Use this when the app under test needs more than
+   * one URL from the same stack.
+   */
+  services?: Record<string, ServiceSpec>
   env?: Record<string, string>
   db?: DbSpec
   cache?: CacheSpec
@@ -95,10 +120,16 @@ export interface EnvRecord {
   ownerId: string
   spec: EnvSpec
   state: EnvState
+  /** The primary service's URL. Kept alongside `urls` because almost every
+   *  caller wants exactly one address and should not have to pick. */
   url?: string
-  /** Host port the app container publishes. Persisted so ingress can be
-   *  reconstructed after a proxy restart without re-provisioning the env. */
+  /** Every service's public URL, keyed by service name. */
+  urls?: Record<string, string> | undefined
+  /** Host port the primary service publishes. */
   hostPort?: number
+  /** Published host port per service. Persisted so every route can be rebuilt
+   *  after a proxy restart without re-provisioning. */
+  hostPorts?: Record<string, number> | undefined
   /** Reachable from inside the env network only; never the public URL. */
   internalDbUrl?: string
   internalCacheUrl?: string

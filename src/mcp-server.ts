@@ -222,19 +222,32 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
   
   /* --------------------------------------------------------- environments */
 
-  const envView = (e: { id: string; state: string; url?: string; expiresAt: number; error?: string; spec?: { db?: unknown; cache?: unknown } }) => ({
+  const envView = (e: { id: string; state: string; url?: string; urls?: Record<string, string>; expiresAt: number; error?: string; spec?: { db?: unknown; cache?: unknown } }) => ({
     envId: e.id,
     state: e.state,
     url: e.url ?? null,
+    ...(e.urls && Object.keys(e.urls).length > 1 ? { urls: e.urls } : {}),
     secondsRemaining: Math.max(0, Math.round((e.expiresAt - Date.now()) / 1000)),
     hasDatabase: Boolean(e.spec?.db),
     hasCache: Boolean(e.spec?.cache),
     ...(e.error ? { error: e.error } : {}),
   });
 
+  const SERVICE = z.object({
+    image: z.string(),
+    port: z.number(),
+    env: z.record(z.string(), z.string()).optional(),
+    primary: z.boolean().optional().describe('Keeps the bare hostname. Exactly one service must set this.'),
+  });
+
   const ENV_INPUT = {
-    image: z.string().describe('Image tag the runtime can pull or already has, e.g. "layout-service:dev".'),
-    port: z.number().describe('Port the app listens on inside the container.'),
+    image: z.string().optional().describe('Single-service shorthand. Image tag the runtime can pull, e.g. "layout-service:dev".'),
+    port: z.number().optional().describe('Port that image listens on. Use with `image`.'),
+    services: z.record(z.string(), SERVICE).optional().describe(
+      'Several services sharing one database, one cache and one network -- use when the app needs more than ' +
+      'one URL from the same stack, e.g. { layout: {image,port,primary:true}, admin: {image,port} }. ' +
+      'The primary keeps the bare hostname; others get <slug>-<name>. Each service reaches the others at ' +
+      'http://<name>:<port>, also injected as SERVICE_<NAME>_URL.'),
     env: z.record(z.string(), z.string()).optional().describe('Extra environment variables for the app container.'),
     database: z.enum(['postgres', 'mysql']).optional().describe('Attach a database and inject DATABASE_URL.'),
     seedSql: z.string().optional().describe('SQL applied after the database is ready and BEFORE the app starts.'),
@@ -250,9 +263,13 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       : seedFile ? { kind: seedFile.endsWith('.sql') ? 'sqlFile' : 'dump', path: seedFile }
       : undefined;
     const engine = (a.database as string | undefined) ?? (seed ? 'postgres' : undefined);
+    const services = a.services as Record<string, { image: string; port: number; env?: Record<string, string>; primary?: boolean }> | undefined;
     return {
-      image: { kind: 'tag' as const, tag: a.image as string },
-      port: a.port as number,
+      ...(services
+        ? { services: Object.fromEntries(Object.entries(services).map(([n, svc]) => [n, {
+            ...svc, image: { kind: 'tag' as const, tag: svc.image },
+          }])) }
+        : { image: { kind: 'tag' as const, tag: a.image as string }, port: a.port as number }),
       ...(a.env ? { env: a.env as Record<string, string> } : {}),
       ...(a.ttlSeconds ? { ttlSeconds: a.ttlSeconds as number } : {}),
       ...(a.memoryMb ? { resources: { memoryMb: a.memoryMb as number } } : {}),
@@ -283,11 +300,15 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       ...toBody(a as Record<string, unknown>),
       ...(a.reservationSeconds ? { reservationSeconds: a.reservationSeconds } : {}),
     } as never);
+    const many = rec.urls && Object.keys(rec.urls).length > 1;
     return json({
       envId: rec.id,
       url: rec.url,
+      ...(many ? { urls: rec.urls } : {}),
       state: rec.state,
-      next: `Build with url "${rec.url}", then call provision_env with envId "${rec.id}".`,
+      next: many
+        ? `Build with these urls, then call provision_env with envId "${rec.id}".`
+        : `Build with url "${rec.url}", then call provision_env with envId "${rec.id}".`,
     });
   });
 

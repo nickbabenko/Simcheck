@@ -9,6 +9,7 @@
 import type { Drivers } from './drivers/index.js'
 import type { EnvRecord } from './types.js'
 import { provisionEnv } from './provision.js'
+import { allSlugs } from './services.js'
 
 export interface ReconcilerOptions {
   /** Identifies this replica in leases. */
@@ -37,6 +38,25 @@ export interface Reconciler {
 /** States that mean "provisioning has not finished". All route to the same
  *  re-runnable provisioning call; the distinction is for reporting only. */
 const IN_PROGRESS = new Set(['pending', 'provisioning', 'seeding'])
+
+/** Every hostname an environment occupies. Falls back to the bare slug for
+ *  records written before services existed. */
+function slugsOf(rec: EnvRecord): string[] {
+  if (rec.urls && Object.keys(rec.urls).length) {
+    return Object.keys(rec.urls).map((name) => slugFor(rec, name));
+  }
+  try {
+    return allSlugs(rec.slug, rec.spec);
+  } catch {
+    return [rec.slug];
+  }
+}
+
+function slugFor(rec: EnvRecord, service: string): string {
+  const svcs = rec.spec?.services;
+  const isPrimary = !svcs || Object.keys(svcs).length <= 1 || svcs[service]?.primary === true;
+  return isPrimary ? rec.slug : `${rec.slug}-${service}`;
+}
 
 export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconciler {
   let timer: NodeJS.Timeout | undefined
@@ -103,6 +123,8 @@ export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconcile
         state: 'ready',
         url: result.url,
         hostPort: result.hostPort,
+        urls: result.urls,
+        hostPorts: result.hostPorts,
         ...(result.internalDbUrl ? { internalDbUrl: result.internalDbUrl } : {}),
         ...(result.internalCacheUrl ? { internalCacheUrl: result.internalCacheUrl } : {}),
       })
@@ -116,7 +138,9 @@ export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconcile
 
     if (rec.state === 'expired' || rec.state === 'destroying') {
       // Both idempotent, so a partial teardown retries cleanly.
-      await d.ingress.detach(rec.slug)
+      // Every service the environment published, not just the primary --
+       // otherwise the secondary hostnames outlive the containers behind them.
+      for (const slug of slugsOf(rec)) await d.ingress.detach(slug)
       await d.runtime.destroy(rec.id)
       await d.store.update(rec.id, { state: 'destroyed', leaseHolder: undefined, leaseExpiresAt: undefined })
     }
@@ -196,7 +220,7 @@ export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconcile
     }
 
     const attached = new Set(await d.ingress.listSlugs());
-    const knownSlugs = new Set(live.map((r) => r.slug));
+    const knownSlugs = new Set(live.flatMap((r) => slugsOf(r)));
     for (const slug of attached) {
       if (!knownSlugs.has(slug)) await d.ingress.detach(slug);
     }
@@ -204,8 +228,11 @@ export function createReconciler(d: Drivers, opts: ReconcilerOptions): Reconcile
     // every route it held, and without this each running environment would go
     // quietly unreachable while still reporting itself ready.
     for (const rec of live) {
-      if (rec.state === 'ready' && rec.hostPort && !attached.has(rec.slug)) {
-        await d.ingress.attach(rec.slug, { host: '127.0.0.1', port: rec.hostPort });
+      if (rec.state !== 'ready') continue;
+      const ports = rec.hostPorts ?? (rec.hostPort ? { app: rec.hostPort } : {});
+      for (const [name, port] of Object.entries(ports)) {
+        const slug = slugFor(rec, name);
+        if (!attached.has(slug)) await d.ingress.attach(slug, { host: '127.0.0.1', port });
       }
     }
   }

@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import type { Drivers } from './drivers/index.js'
 import type { EnvRecord, EnvSpec, Quota } from './types.js'
 import { newSlug } from './slug.js'
+import { normaliseServices, serviceSlug } from './services.js'
 import { assertOwns, requireScope, type Principal } from './principal.js'
 import { packContext } from './context.js'
 
@@ -83,13 +84,22 @@ export function createService(d: Drivers, quota: Quota): Service {
       const now = Date.now()
       const until = now + (reservationSeconds ?? DEFAULT_RESERVATION_SECONDS) * 1000
       const slug = newSlug()
+      // Validate here rather than at provision: the whole point of reserving is
+      // that a build is about to be told these URLs, and finding out the service
+      // map was malformed after a ten-minute build is a poor way to learn.
+      const services = normaliseServices({ ...req, ownerId: p.ownerId })
+      const urls = Object.fromEntries(
+        services.map((svc) => [svc.name, d.ingress.urlFor(serviceSlug(slug, svc))]),
+      )
+      const primary = services.find((svc) => svc.primary)!
       const rec: EnvRecord = {
         id: randomUUID(),
         slug,
         ownerId: p.ownerId,
         spec: { ...req, ownerId: p.ownerId },
         state: 'reserved',
-        url: d.ingress.urlFor(slug),
+        url: urls[primary.name]!,
+        urls,
         createdAt: now,
         // Mirrors reservedUntil so any generic expiry logic behaves sensibly;
         // the real runtime clock is set when it is provisioned.
@@ -108,6 +118,8 @@ export function createService(d: Drivers, quota: Quota): Service {
           `at the concurrent env limit (${active}/${quota.maxConcurrentEnvs}); destroy one or raise ENVCHECK_MAX_ENVS`,
         )
       }
+      // Fail on a malformed service map before anything is created.
+      normaliseServices({ ...req, ownerId: p.ownerId })
       const ttl = Math.min(req.ttlSeconds ?? quota.defaultTtlSeconds, quota.maxTtlSeconds)
       if (req.resources?.memoryMb && req.resources.memoryMb > quota.maxMemoryMbPerEnv) {
         throw new QuotaError(`requested ${req.resources.memoryMb} MB, limit is ${quota.maxMemoryMbPerEnv} MB`)

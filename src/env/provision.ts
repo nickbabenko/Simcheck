@@ -10,6 +10,7 @@ import { readFile } from 'node:fs/promises'
 import type { ContainerHandle, Drivers } from './drivers/index.js'
 import type { EnvRecord, EnvState, SeedSpec } from './types.js'
 import { ENGINES, supportsTemplate, type Engine, type EngineContext } from './engines.js'
+import { internalEnv, normaliseServices, serviceSlug } from './services.js'
 
 const DEFAULT_REDIS = '7-alpine'
 
@@ -18,8 +19,11 @@ const DEFAULT_REDIS = '7-alpine'
 const SEED_MARKER = '_envcheck_seeded'
 
 export interface ProvisionResult {
+  /** The primary service's URL. */
   url: string
   hostPort: number
+  urls: Record<string, string>
+  hostPorts: Record<string, number>
   internalDbUrl?: string
   internalCacheUrl?: string
 }
@@ -94,29 +98,53 @@ export async function provisionEnv(d: Drivers, rec: EnvRecord, o: ProvisionDeps)
     internalCacheUrl = 'redis://cache:6379'
   }
 
-  // --- app -----------------------------------------------------------------
+  // --- services ------------------------------------------------------------
   // Started only now: after the database exists and the seed has been applied.
-  const image = await d.images.resolve(spec.image)
-  const app = await d.runtime.run({
-    envId: rec.id,
-    role: 'app',
-    image,
-    networkId: network,
-    publish: spec.port,
-    env: {
-      ...(internalDbUrl ? { DATABASE_URL: internalDbUrl } : {}),
-      ...(internalCacheUrl ? { REDIS_URL: internalCacheUrl } : {}),
-      PORT: String(spec.port),
-      ...spec.env,
-    },
-    ...(spec.resources ? { resources: spec.resources } : {}),
-  })
-  await d.runtime.waitHealthy(app, timeout)
-  if (!app.hostPort) throw new Error('app container did not publish a host port')
+  // Every service shares the database, the cache and the network, which is what
+  // makes them one stack rather than several environments that happen to agree.
+  const services = normaliseServices(spec)
+  const shared = {
+    ...(internalDbUrl ? { DATABASE_URL: internalDbUrl } : {}),
+    ...(internalCacheUrl ? { REDIS_URL: internalCacheUrl } : {}),
+    ...internalEnv(services),
+    ...spec.env,
+  }
 
-  const url = await d.ingress.attach(rec.slug, { host: '127.0.0.1', port: app.hostPort })
+  const urls: Record<string, string> = {}
+  const hostPorts: Record<string, number> = {}
+  let primaryUrl: string | undefined
+  let primaryPort: number | undefined
 
-  const result: ProvisionResult = { url, hostPort: app.hostPort }
+  for (const svc of services) {
+    const image = await d.images.resolve(svc.image)
+    const container = await d.runtime.run({
+      envId: rec.id,
+      // The role doubles as the network alias, so one service reaches another
+      // at http://<name>:<port> without knowing any public hostname.
+      role: svc.name,
+      image,
+      networkId: network,
+      publish: svc.port,
+      env: { ...shared, PORT: String(svc.port), ...svc.env },
+      ...(svc.resources ?? spec.resources ? { resources: svc.resources ?? spec.resources! } : {}),
+    })
+    await d.runtime.waitHealthy(container, timeout)
+    if (!container.hostPort) throw new Error(`service '${svc.name}' published no host port`)
+
+    const url = await d.ingress.attach(serviceSlug(rec.slug, svc), {
+      host: '127.0.0.1', port: container.hostPort,
+    })
+    urls[svc.name] = url
+    hostPorts[svc.name] = container.hostPort
+    if (svc.primary) {
+      primaryUrl = url
+      primaryPort = container.hostPort
+    }
+  }
+
+  if (!primaryUrl || primaryPort === undefined) throw new Error('no primary service was started')
+
+  const result: ProvisionResult = { url: primaryUrl, hostPort: primaryPort, urls, hostPorts }
   if (internalDbUrl) result.internalDbUrl = internalDbUrl
   if (internalCacheUrl) result.internalCacheUrl = internalCacheUrl
   return result

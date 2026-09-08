@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS envs (
   created_at       INTEGER NOT NULL,
   expires_at       INTEGER NOT NULL,
   reserved_until   INTEGER,
+  urls             TEXT,
+  host_ports       TEXT,
   error            TEXT,
   lease_holder     TEXT,
   lease_expires_at INTEGER
@@ -39,7 +41,7 @@ CREATE INDEX IF NOT EXISTS envs_owner ON envs (owner_id, state);
 
 type Row = {
   id: string; slug: string; owner_id: string; spec: string; state: string
-  url: string | null; host_port: number | null; internal_db_url: string | null; internal_cache_url: string | null
+  url: string | null; host_port: number | null; urls: string | null; host_ports: string | null; internal_db_url: string | null; internal_cache_url: string | null
   created_at: number; expires_at: number; reserved_until: number | null; error: string | null
   lease_holder: string | null; lease_expires_at: number | null
 }
@@ -56,6 +58,8 @@ function toRecord(r: Row): EnvRecord {
   }
   if (r.url !== null) rec.url = r.url
   if (r.host_port !== null) rec.hostPort = r.host_port
+  if (r.urls !== null) rec.urls = JSON.parse(r.urls) as Record<string, string>
+  if (r.host_ports !== null) rec.hostPorts = JSON.parse(r.host_ports) as Record<string, number>
   if (r.internal_db_url !== null) rec.internalDbUrl = r.internal_db_url
   if (r.internal_cache_url !== null) rec.internalCacheUrl = r.internal_cache_url
   if (r.reserved_until !== null) rec.reservedUntil = r.reserved_until
@@ -70,6 +74,7 @@ const COLUMN: Record<string, string> = {
   slug: 'slug', ownerId: 'owner_id', state: 'state', url: 'url', hostPort: 'host_port',
   internalDbUrl: 'internal_db_url', internalCacheUrl: 'internal_cache_url',
   expiresAt: 'expires_at', reservedUntil: 'reserved_until', error: 'error', spec: 'spec',
+  urls: 'urls', hostPorts: 'host_ports',
   leaseHolder: 'lease_holder', leaseExpiresAt: 'lease_expires_at',
 }
 
@@ -84,7 +89,12 @@ const COLUMN: Record<string, string> = {
 const ADDED_COLUMNS: Array<[string, string]> = [
   ['host_port', 'INTEGER'],
   ['reserved_until', 'INTEGER'],
+  ['urls', 'TEXT'],
+  ['host_ports', 'TEXT'],
 ]
+
+/** Columns holding JSON rather than a scalar. */
+const JSON_COLUMNS = new Set(['spec', 'urls', 'host_ports'])
 
 function migrate(db: DatabaseSync): void {
   const present = new Set(
@@ -110,13 +120,16 @@ export function createSqliteStore(path: string): Store & { close(): void } {
     async create(rec) {
       db.prepare(
         `INSERT INTO envs (id, slug, owner_id, spec, state, url, host_port, internal_db_url,
-           internal_cache_url, created_at, expires_at, reserved_until, error, lease_holder, lease_expires_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           internal_cache_url, created_at, expires_at, reserved_until, error, lease_holder, lease_expires_at,
+           urls, host_ports)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(
         rec.id, rec.slug, rec.ownerId, JSON.stringify(rec.spec), rec.state,
         rec.url ?? null, rec.hostPort ?? null, rec.internalDbUrl ?? null, rec.internalCacheUrl ?? null,
         rec.createdAt, rec.expiresAt, rec.reservedUntil ?? null, rec.error ?? null,
         rec.leaseHolder ?? null, rec.leaseExpiresAt ?? null,
+        rec.urls ? JSON.stringify(rec.urls) : null,
+        rec.hostPorts ? JSON.stringify(rec.hostPorts) : null,
       )
     },
 
@@ -152,7 +165,7 @@ export function createSqliteStore(path: string): Store & { close(): void } {
         // spec is the one column that is not a scalar. Without this it would be
         // bound as an object, which SQLite rejects -- or worse, silently stored
         // as "[object Object]" by a driver that coerces.
-        args.push(col === 'spec' ? JSON.stringify(v) : v === undefined ? null : v)
+        args.push(JSON_COLUMNS.has(col) ? JSON.stringify(v) : v === undefined ? null : v)
       }
       if (!sets.length) return
       args.push(id)

@@ -28,6 +28,7 @@ export interface EnvView {
   id: string;
   slug: string;
   ownerId: string;
+  urls?: Record<string, string>;
   state: 'pending' | 'provisioning' | 'seeding' | 'ready' | 'failed' | 'expired' | 'destroying' | 'destroyed';
   url?: string;
   expiresAt: number;
@@ -35,9 +36,18 @@ export interface EnvView {
   spec: { port: number; db?: { engine: string }; cache?: { engine: string } };
 }
 
-export interface EnvRequestBody {
+export interface EnvServiceBody {
   image: { kind: 'tag'; tag: string } | { kind: 'registry'; ref: string };
   port: number;
+  env?: Record<string, string>;
+  /** Keeps the bare hostname; the rest get <slug>-<name>. */
+  primary?: boolean;
+}
+
+export interface EnvRequestBody {
+  image?: { kind: 'tag'; tag: string } | { kind: 'registry'; ref: string };
+  port?: number;
+  services?: Record<string, EnvServiceBody>;
   env?: Record<string, string>;
   db?: { engine: 'postgres' | 'mysql'; version?: string; database?: string; seed?: unknown };
   cache?: { engine: 'redis' };
