@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import httpMod from 'node:http';
 import tls from 'node:tls';
 import { spawnSync } from 'node:child_process';
 import type { Config } from './config.js';
@@ -14,6 +15,81 @@ export interface Check {
   fix?: string;
 }
 
+/**
+ * Environments need two things this daemon does not own: a container runtime
+ * speaking the Docker Engine API, and a proxy to route unguessable hostnames.
+ * Both fail at provision time with errors that read like envcheck bugs, so they
+ * are worth naming here instead.
+ */
+async function envChecks(cfg: Config): Promise<Check[]> {
+  const checks: Check[] = [];
+
+  const runtime = await probeJson(dockerPing(cfg.envDockerHost));
+  checks.push(runtime.ok
+    ? { name: 'container runtime', state: 'ok', detail: `${cfg.envDockerHost} responding` }
+    : {
+        name: 'container runtime',
+        state: 'fail',
+        detail: `no Docker Engine API at ${cfg.envDockerHost} (${runtime.error})`,
+        fix: 'podman machine start   (or start OrbStack / Docker Desktop)',
+      });
+
+  const admin = cfg.envCaddyAdmin;
+  const caddy = await probeJson(fetch(`${admin}/config/`, { signal: AbortSignal.timeout(2000) })
+    .then((r) => r.ok));
+  checks.push(caddy.ok
+    ? { name: 'ingress proxy', state: 'ok', detail: `Caddy admin API at ${admin}` }
+    : {
+        name: 'ingress proxy',
+        state: 'fail',
+        detail: `no Caddy admin API at ${admin} (${caddy.error})`,
+        fix: 'caddy run   (environments provision but are unreachable without it)',
+      });
+
+  // Serving https needs a WILDCARD certificate. A per-name certificate is
+  // published to Certificate Transparency logs within seconds, which would make
+  // every environment hostname publicly enumerable.
+  if (cfg.envTlsCert && cfg.envTlsKey) {
+    checks.push(fs.existsSync(cfg.envTlsCert) && fs.existsSync(cfg.envTlsKey)
+      ? { name: 'wildcard certificate', state: 'ok', detail: cfg.envTlsCert }
+      : { name: 'wildcard certificate', state: 'fail', detail: `not found at ${cfg.envTlsCert}` });
+  } else {
+    checks.push({
+      name: 'wildcard certificate',
+      state: 'warn',
+      detail: `environments serve plain http at *.${cfg.envBaseDomain}`,
+      fix: 'set envTlsCert/envTlsKey to a *.<envBaseDomain> certificate; a real device needs https',
+    });
+  }
+
+  return checks;
+}
+
+/** Docker Engine API ping over a unix socket or tcp, without a dependency. */
+function dockerPing(host: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const opts = host.startsWith('tcp://') || host.startsWith('http://')
+      ? (() => { const u = new URL(host.replace(/^tcp:\/\//, 'http://'));
+                 return { host: u.hostname, port: u.port || 2375, path: '/v1.41/_ping' }; })()
+      : { socketPath: host.replace(/^unix:\/\//, ''), path: '/v1.41/_ping' };
+    const req = httpMod.request({ ...opts, method: 'GET', timeout: 2000 }, (res) => {
+      res.resume();
+      resolve((res.statusCode ?? 0) < 400);
+    });
+    req.on('timeout', () => { req.destroy(new Error('timed out')); });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function probeJson(p: Promise<boolean>): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return (await p) ? { ok: true } : { ok: false, error: 'unexpected response' };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 /** Vendors whose presence in a certificate chain means TLS is being inspected. */
 const INSPECTORS = /netskope|zscaler|bluecoat|blue coat|forcepoint|palo alto|mcafee|websense|fortinet|cisco umbrella|proxy/i;
 
@@ -27,6 +103,7 @@ export async function diagnose(cfg: Config): Promise<Check[]> {
   if (cfg.platforms.includes('ios')) checks.push(...iosChecks(cfg));
   if (cfg.platforms.includes('android')) checks.push(...androidChecks(cfg));
   checks.push(...await networkChecks(cfg));
+  if (cfg.envEnabled) checks.push(...await envChecks(cfg));
   return checks;
 }
 

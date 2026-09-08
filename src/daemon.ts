@@ -12,6 +12,7 @@ import { AuditLog } from './audit.js';
 import { ArtifactStore } from './artifacts.js';
 import { createEdgeVerifier, caBundleStatus } from './edge.js';
 import { loadPlatforms } from './platforms.js';
+import { createEnvSubsystem, describeEnvRuntime } from './env/index.js';
 import { androidManifestReader } from './android/index.js';
 import { logger, logToFile } from './log.js';
 
@@ -66,9 +67,17 @@ async function main(): Promise<void> {
   const edge = await createEdgeVerifier(cfg);
   log.info(`edge auth: ${edge.describe()}`);
 
+  // Environments are optional: a Mac with no container runtime is still a
+  // perfectly good simulator harness, and failing to start over a missing
+  // Docker socket would be a poor trade.
+  const envs = cfg.envEnabled ? createEnvSubsystem(cfg, cfg.home) : undefined;
+  if (envs) {
+    log.info(`environments: ${await describeEnvRuntime(envs)} at *.${cfg.envBaseDomain}`);
+  }
+
   const server = createServer({
     cfg, pool, store, runner, scheduler, tokens, audit, artifacts, edge, platforms,
-    llmName: llm?.name ?? null,
+    llmName: llm?.name ?? null, envs,
   });
 
   // Binding beyond loopback with no edge auth would publish an RCE surface.
@@ -89,6 +98,10 @@ async function main(): Promise<void> {
 
   // Serve requests immediately; the pool fills in the background.
   scheduler.start();
+  // Must run here rather than in the MCP process: a stdio MCP server dies with
+  // the client session, and TTLs would then only be honoured while an agent
+  // happened to be connected.
+  envs?.reconciler.start();
   pool.start().then(
     () => log.info(`pool warm: ${pool.list().filter((d) => d.status === 'ready').length}/${pool.targetCount()} ready`),
     (e) => log.error('pool failed to start', (e as Error).message),
@@ -100,6 +113,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log.info(`${signal} received, shutting down`);
     scheduler.stop();
+    await envs?.reconciler.stop();
     await pool.stop();
     server.close();
     // Leave the simulators booted -- that is the point of a warm pool.

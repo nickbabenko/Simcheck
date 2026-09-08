@@ -48,6 +48,11 @@ if [ "$UNINSTALL" = 1 ]; then
   rm -f "$BINDIR/simcheck" "$BINDIR/simcheck-mcp" && ok "symlinks removed"
   rm -rf "$SKILLDIR" && ok "skill removed"
   command -v claude >/dev/null && { claude mcp remove simcheck --scope user >/dev/null 2>&1 || true; ok "MCP entry removed"; }
+  # Containers are not ours to reap on uninstall: a running environment may be
+  # holding data someone is mid-way through using. The daemon's own reaper
+  # handles them, and `simcheck` gone means it will not start new ones.
+  command -v podman >/dev/null && podman ps --filter label=envcheck.env -q 2>/dev/null | grep -q . \
+    && warn "environments are still running; destroy them with: podman rm -f \$(podman ps -aq --filter label=envcheck.env)" || true
   warn "left alone: $HARNESS_HOME (runs and token) and any simcheck-* simulators"
   echo "    delete those with: rm -rf $HARNESS_HOME  &&  xcrun simctl delete <udid>"
   exit 0
@@ -130,6 +135,44 @@ else
   else
     warn "skipping the multi-touch driver: needs a JDK and Gradle (brew install gradle), then ./driver/build.sh"
   fi
+fi
+
+# ----------------------------------------------------------- environments --
+# Also entirely optional, and off by default. Disposable backend environments
+# let you test an app change and a server change together without deploying the
+# server first -- but they need a container runtime and a proxy, and a Mac with
+# neither is still a perfectly good simulator harness. Nothing here is fatal.
+say "Checking environment support (optional)"
+
+ENV_RUNTIME=""
+for sock in "${DOCKER_HOST:-}" /var/run/docker.sock "$HOME/.docker/run/docker.sock" "$HOME/.orbstack/run/docker.sock"; do
+  [ -n "$sock" ] && [ -S "${sock#unix://}" ] && { ENV_RUNTIME="${sock#unix://}"; break; }
+done
+
+if [ -z "$ENV_RUNTIME" ]; then
+  warn "no container runtime socket found -- environments will stay off"
+  echo "        podman machine start        (or install OrbStack / Docker Desktop)"
+elif ! command -v caddy >/dev/null; then
+  warn "container runtime at $ENV_RUNTIME, but caddy is missing"
+  echo "        brew install caddy          -- environments provision but are unreachable without it"
+else
+  ok "container runtime at $ENV_RUNTIME"
+  ok "caddy present"
+  # Written only when absent, so re-running the installer never overwrites a
+  # tuned config -- same reason provision.sh does not clobber an existing key.
+  if [ -f "$HARNESS_HOME/config.json" ] && grep -q '"envEnabled"' "$HARNESS_HOME/config.json" 2>/dev/null; then
+    ok "envEnabled already set in $HARNESS_HOME/config.json"
+  else
+    warn "environments are off by default. To enable, add to $HARNESS_HOME/config.json:"
+    echo '          "envEnabled": true,'
+    echo "          \"envDockerHost\": \"$ENV_RUNTIME\""
+    echo "        then: simcheck stop && simcheck start && simcheck doctor"
+  fi
+  # https needs a WILDCARD certificate: a per-name one is published to
+  # Certificate Transparency logs within seconds, which would make every
+  # environment hostname publicly enumerable.
+  echo "        A real device needs https -- issue a *.<envBaseDomain> wildcard"
+  echo "        (never per-name) and set envTlsCert / envTlsKey."
 fi
 
 # ------------------------------------------------------------------- build --

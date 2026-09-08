@@ -220,6 +220,150 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
     inputSchema: { runId: z.string() },
   }, async ({ runId }) => json(outcome(await client.cancel(runId))));
   
+  /* --------------------------------------------------------- environments */
+
+  const envView = (e: { id: string; state: string; url?: string; expiresAt: number; error?: string; spec?: { db?: unknown; cache?: unknown } }) => ({
+    envId: e.id,
+    state: e.state,
+    url: e.url ?? null,
+    secondsRemaining: Math.max(0, Math.round((e.expiresAt - Date.now()) / 1000)),
+    hasDatabase: Boolean(e.spec?.db),
+    hasCache: Boolean(e.spec?.cache),
+    ...(e.error ? { error: e.error } : {}),
+  });
+
+  server.registerTool('provision_env', {
+    title: 'Provision a disposable backend environment',
+    description: [
+      'Start a container image as a throwaway backend -- optionally with a seeded Postgres or MySQL and a Redis --',
+      'and get back a URL you can point a build at. This is how you test an app change and a server change together',
+      'without deploying the server anywhere first.',
+      '',
+      'The intended shape is: provision_env -> wait_for_env -> run_device_test with',
+      'launchEnv { API_BASE_URL: <url> } -> destroy_env.',
+      '',
+      'Returns immediately with an envId; the URL is not reachable until wait_for_env reports ready.',
+      'Environments expire on their own. The clock starts at provision, not at ready, so a cold image pull',
+      'eats into the lifetime -- call extend_env if you need longer.',
+      '',
+      'The URL is unguessable but NOT authenticated. Do not put real credentials or production data behind it.',
+    ].join('\n'),
+    inputSchema: {
+      image: z.string().describe('Image tag the runtime can pull or already has, e.g. "myapi:dev" or "nginx:alpine".'),
+      port: z.number().describe('Port the app listens on inside the container.'),
+      env: z.record(z.string(), z.string()).optional().describe('Extra environment variables for the app container.'),
+      database: z.enum(['postgres', 'mysql']).optional().describe('Attach a database and inject DATABASE_URL.'),
+      seedSql: z.string().optional().describe('SQL applied after the database is ready and BEFORE the app starts.'),
+      seedFile: z.string().optional().describe('Absolute path to a .sql file, or a pg_dump custom-format file.'),
+      cache: z.boolean().optional().describe('Attach Redis and inject REDIS_URL.'),
+      ttlSeconds: z.number().optional(),
+      memoryMb: z.number().optional(),
+    },
+  }, async (a) => {
+    const seed = a.seedSql ? { kind: 'sql', sql: a.seedSql }
+      : a.seedFile ? { kind: a.seedFile.endsWith('.sql') ? 'sqlFile' : 'dump', path: a.seedFile }
+      : undefined;
+    const engine = a.database ?? (seed ? 'postgres' : undefined);
+    const rec = await client.provisionEnv({
+      image: { kind: 'tag', tag: a.image },
+      port: a.port,
+      ...(a.env ? { env: a.env } : {}),
+      ...(a.ttlSeconds ? { ttlSeconds: a.ttlSeconds } : {}),
+      ...(a.memoryMb ? { resources: { memoryMb: a.memoryMb } } : {}),
+      ...(engine ? { db: { engine, ...(seed ? { seed } : {}) } } : {}),
+      ...(a.cache ? { cache: { engine: 'redis' as const } } : {}),
+    });
+    return json({ ...envView(rec), next: `Call wait_for_env with envId "${rec.id}".` });
+  });
+
+  server.registerTool('wait_for_env', {
+    title: 'Wait for an environment to become ready',
+    description:
+      'Block until the environment is ready or failed, or until the wait budget runs out. If it returns ' +
+      'done=false it is still coming up -- call it again; repeated calls are the intended way to wait. ' +
+      'The default stays below the ~60s per-call limit most MCP clients impose.',
+    inputSchema: { envId: z.string(), timeoutMs: z.number().optional() },
+  }, async ({ envId, timeoutMs }) => {
+    const rec = await client.waitForEnv(envId, Math.min(timeoutMs ?? 45_000, 600_000));
+    return json({
+      ...envView(rec), done: rec.done,
+      ...(rec.done && rec.state === 'ready'
+        ? { next: `Pass ${rec.url} to the app under test, e.g. run_device_test launchEnv { API_BASE_URL: "${rec.url}" }.` }
+        : rec.done ? { next: 'Call env_logs to see why it failed.' }
+        : { next: 'Still provisioning -- call wait_for_env again.' }),
+    });
+  });
+
+  server.registerTool('get_env', {
+    title: 'Get environment state',
+    description: 'Current state, URL and remaining lifetime. Prefer wait_for_env over polling this.',
+    inputSchema: { envId: z.string() },
+  }, async ({ envId }) => json(envView(await client.getEnv(envId))));
+
+  server.registerTool('list_envs', {
+    title: 'List environments',
+    description: 'Every environment this daemon knows about, including recently destroyed ones.',
+    inputSchema: {},
+  }, async () => json((await client.listEnvs()).map(envView)));
+
+  server.registerTool('extend_env', {
+    title: 'Extend an environment lifetime',
+    description: 'Push the expiry out. Capped at the configured maximum TTL, measured from creation.',
+    inputSchema: { envId: z.string(), seconds: z.number() },
+  }, async ({ envId, seconds }) => json(envView(await client.extendEnv(envId, seconds))));
+
+  server.registerTool('destroy_env', {
+    title: 'Destroy an environment',
+    description: 'Tear it down now rather than waiting for the TTL. Returns before teardown completes.',
+    inputSchema: { envId: z.string() },
+  }, async ({ envId }) => json(await client.destroyEnv(envId)));
+
+  server.registerTool('env_logs', {
+    title: 'Read environment logs',
+    description:
+      'Container logs for the environment. Call this first when one fails -- re-provisioning the same image ' +
+      'without reading the logs will usually fail the same way.',
+    inputSchema: {
+      envId: z.string(),
+      role: z.enum(['app', 'db', 'cache']).optional().describe('Omit for all containers.'),
+      tail: z.number().optional(),
+    },
+  }, async ({ envId, role, tail }) => json(await client.envLogs(envId, {
+    ...(role ? { role } : {}), ...(tail ? { tail } : {}),
+  })));
+
+  server.registerTool('exec_in_env', {
+    title: 'Run a command inside an environment',
+    description: 'Execute a command in the app container -- migrations, a psql query, a health probe.',
+    inputSchema: { envId: z.string(), command: z.array(z.string()).describe('argv, e.g. ["npm","run","migrate"]') },
+  }, async ({ envId, command }) => json(await client.execInEnv(envId, command)));
+
+  server.registerTool('build_image', {
+    title: 'Build a container image from a local directory',
+    description:
+      'Pack a build context and build it, returning a reference provision_env can run. Respects .dockerignore ' +
+      'except when it uses negation (!), in which case the whole context is sent and a warning is returned.',
+    inputSchema: {
+      contextPath: z.string().describe('Absolute path to the build context directory on this Mac.'),
+      tag: z.string().describe('Tag to build, e.g. "myapi:dev".'),
+      dockerfile: z.string().optional(),
+      buildArgs: z.record(z.string(), z.string()).optional(),
+    },
+  }, async (a) => json(await client.buildImage({
+    contextPath: a.contextPath, tag: a.tag,
+    ...(a.dockerfile ? { dockerfile: a.dockerfile } : {}),
+    ...(a.buildArgs ? { buildArgs: a.buildArgs } : {}),
+  })));
+
+  server.registerTool('list_images', {
+    title: 'List images available to provision from',
+    description: 'Tags the container runtime can already run, largest first. Use to check whether a build is needed.',
+    inputSchema: {},
+  }, async () => json((await client.listImages())
+    .sort((a, b) => b.sizeBytes - a.sizeBytes)
+    .slice(0, 60)
+    .map((i) => ({ tag: i.tag, sizeMb: Math.round(i.sizeBytes / 1024 ** 2) }))));
+
   server.registerTool('sim_pool_status', {
     title: 'Device pool status',
     description: 'How many simulators and emulators are ready, busy or still pending, and how many runs are queued. Check here if runs are sitting in "pending".',

@@ -24,6 +24,27 @@ export interface Artifact {
   uploadedAt: string; uploadedBy: string; label?: string; gitSha?: string;
 }
 
+export interface EnvView {
+  id: string;
+  slug: string;
+  ownerId: string;
+  state: 'pending' | 'provisioning' | 'seeding' | 'ready' | 'failed' | 'expired' | 'destroying' | 'destroyed';
+  url?: string;
+  expiresAt: number;
+  error?: string;
+  spec: { port: number; db?: { engine: string }; cache?: { engine: string } };
+}
+
+export interface EnvRequestBody {
+  image: { kind: 'tag'; tag: string } | { kind: 'registry'; ref: string };
+  port: number;
+  env?: Record<string, string>;
+  db?: { engine: 'postgres' | 'mysql'; version?: string; database?: string; seed?: unknown };
+  cache?: { engine: 'redis' };
+  ttlSeconds?: number;
+  resources?: { memoryMb?: number };
+}
+
 export interface WhoAmI {
   token: string;
   capabilities: string[];
@@ -94,6 +115,58 @@ export class Client {
 
   revokeToken(nameOrId: string): Promise<{ revoked: string }> {
     return this.call('DELETE', `/v1/tokens/${encodeURIComponent(nameOrId)}`);
+  }
+
+  /* --------------------------------------------------------- environments */
+
+  provisionEnv(body: EnvRequestBody): Promise<EnvView> {
+    return this.call('POST', '/v1/envs', body);
+  }
+
+  listEnvs(): Promise<EnvView[]> {
+    return this.call('GET', '/v1/envs');
+  }
+
+  getEnv(id: string): Promise<EnvView> {
+    return this.call('GET', `/v1/envs/${encodeURIComponent(id)}`);
+  }
+
+  /** One bounded wait. Returns done=false if it is still coming up; call again.
+   *  The daemon caps the budget well under the ~60s most MCP clients allow for
+   *  a single tool call. */
+  waitForEnv(id: string, timeoutMs = 45_000): Promise<EnvView & { done: boolean }> {
+    return this.call('GET', `/v1/envs/${encodeURIComponent(id)}/wait?timeoutMs=${timeoutMs}`, undefined,
+      timeoutMs + 10_000);
+  }
+
+  extendEnv(id: string, seconds: number): Promise<EnvView> {
+    return this.call('POST', `/v1/envs/${encodeURIComponent(id)}/extend`, { seconds });
+  }
+
+  destroyEnv(id: string): Promise<{ envId: string; state: string }> {
+    return this.call('DELETE', `/v1/envs/${encodeURIComponent(id)}`);
+  }
+
+  envLogs(id: string, opts: { role?: string; tail?: number } = {}): Promise<{ logs: string }> {
+    const q = new URLSearchParams();
+    if (opts.role) q.set('role', opts.role);
+    if (opts.tail) q.set('tail', String(opts.tail));
+    const suffix = q.toString() ? `?${q}` : '';
+    return this.call('GET', `/v1/envs/${encodeURIComponent(id)}/logs${suffix}`);
+  }
+
+  execInEnv(id: string, command: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return this.call('POST', `/v1/envs/${encodeURIComponent(id)}/exec`, { command });
+  }
+
+  buildImage(body: { contextPath: string; tag: string; dockerfile?: string; buildArgs?: Record<string, string> }):
+    Promise<{ image: string; warning?: string }> {
+    // A cold build pulls base layers, so this needs far longer than the default.
+    return this.call('POST', '/v1/images', body, 900_000);
+  }
+
+  listImages(): Promise<{ tag: string; sizeBytes: number; createdAt: number }[]> {
+    return this.call('GET', '/v1/images');
   }
 
   listArtifacts(): Promise<{ artifacts: Artifact[] }> {

@@ -18,6 +18,10 @@ import type { AuditLog } from './audit.js';
 import type { ArtifactStore } from './artifacts.js';
 import { redactHeaders, assertPublic } from './fetchbuild.js';
 import { EdgeAuthError, type EdgeVerifier, type EdgeIdentity } from './edge.js';
+import type { EnvSubsystem } from './env/index.js';
+import { toPrincipal, ForbiddenError } from './env/principal.js';
+import { NotFoundError, QuotaError } from './env/errors.js';
+import type { EnvRequest } from './env/service.js';
 
 const log = logger('api');
 
@@ -25,6 +29,10 @@ interface Deps {
   cfg: Config; pool: Pool; store: Store; runner: Runner; scheduler: Scheduler;
   tokens: TokenStore; audit: AuditLog; artifacts: ArtifactStore; llmName: string | null;
   edge: EdgeVerifier; platforms: Platforms;
+  /** Absent when envEnabled is false, or when no container runtime is present.
+   *  Routes below answer 503 rather than 404 in that case, so the difference
+   *  between "not built" and "not switched on" is visible to a caller. */
+  envs?: EnvSubsystem | undefined;
 }
 
 export function createServer(d: Deps): http.Server {
@@ -32,6 +40,9 @@ export function createServer(d: Deps): http.Server {
     handle(d, req, res).catch((e) => {
       const status = e instanceof EdgeAuthError ? 403
         : e instanceof HttpError || e instanceof AuthError ? (e as { status: number }).status
+        : e instanceof ForbiddenError ? 403
+        : e instanceof NotFoundError ? 404
+        : e instanceof QuotaError ? 429
         : 500;
       if (status === 401 || status === 403 || status === 429) {
         // Edge rejections carry no token, so record them under the source.
@@ -85,6 +96,120 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
       capabilities: who.capabilities,
       limits: { maxConcurrentRuns: who.maxConcurrentRuns, maxRunsPerHour: who.maxRunsPerHour },
     });
+  }
+
+  /* --------------------------------------------------------- environments */
+  // Disposable backends to point a build at. The pool tests the app; these are
+  // what the app talks to, so a change to both can be tested without deploying
+  // anything first.
+  if (resource === 'envs') {
+    if (!d.envs) {
+      // 503, not 404: the route exists, the subsystem is switched off. A 404
+      // would read as "wrong URL" and send someone hunting the wrong problem.
+      throw new HttpError(503, 'environments are not enabled (set envEnabled and a container runtime)');
+    }
+    const svc = d.envs.service;
+    const p = toPrincipal(who);
+
+    if (!id) {
+      if (method === 'POST') {
+        d.tokens.require(who, 'envs:write');
+        const rec = await svc.provision(p, await readJson<EnvRequest>(req));
+        d.audit.record({
+          token: who.name, tokenId: who.id, action: 'POST /v1/envs', outcome: 'ok',
+          remote, detail: { envId: rec.id, image: JSON.stringify(rec.spec.image).slice(0, 120) },
+        });
+        return send(res, 201, rec);
+      }
+      if (method === 'GET') {
+        d.tokens.require(who, 'envs:read');
+        return send(res, 200, await svc.list(p));
+      }
+      throw new HttpError(405, `${method} not allowed on /v1/envs`);
+    }
+
+    if (!sub) {
+      if (method === 'GET') {
+        d.tokens.require(who, 'envs:read');
+        return send(res, 200, await svc.get(p, id));
+      }
+      if (method === 'DELETE') {
+        d.tokens.require(who, 'envs:write');
+        await svc.destroy(p, id);
+        d.audit.record({
+          token: who.name, tokenId: who.id, action: 'DELETE /v1/envs', outcome: 'ok',
+          remote, detail: { envId: id },
+        });
+        return send(res, 202, { envId: id, state: 'destroying' });
+      }
+      throw new HttpError(405, `${method} not allowed on /v1/envs/${id}`);
+    }
+
+    if (sub === 'wait' && method === 'GET') {
+      d.tokens.require(who, 'envs:read');
+      // Bounded well under the ~60s most MCP clients allow a single call, and
+      // answers done=false rather than erroring so the caller can just ask again.
+      const budget = Math.min(Number(url.searchParams.get('timeoutMs') ?? 45_000), 600_000);
+      try {
+        return send(res, 200, { ...(await svc.waitFor(p, id, budget)), done: true });
+      } catch {
+        return send(res, 200, { ...(await svc.get(p, id)), done: false });
+      }
+    }
+    if (sub === 'logs' && method === 'GET') {
+      d.tokens.require(who, 'envs:read');
+      const role = url.searchParams.get('role');
+      const tail = url.searchParams.get('tail');
+      return send(res, 200, {
+        logs: await svc.logs(p, id, {
+          ...(role ? { role } : {}), ...(tail ? { tail: Number(tail) } : {}),
+        }),
+      });
+    }
+    if (sub === 'extend' && method === 'POST') {
+      d.tokens.require(who, 'envs:write');
+      const body = await readJson<{ seconds?: number }>(req);
+      if (typeof body.seconds !== 'number') throw new HttpError(400, 'seconds must be a number');
+      return send(res, 200, await svc.extend(p, id, body.seconds));
+    }
+    if (sub === 'exec' && method === 'POST') {
+      // Its own capability: running arbitrary commands inside a container is a
+      // materially larger grant than starting and stopping one.
+      d.tokens.require(who, 'envs:exec');
+      const body = await readJson<{ command?: string[] }>(req);
+      if (!Array.isArray(body.command)) throw new HttpError(400, 'command must be an array');
+      d.audit.record({
+        token: who.name, tokenId: who.id, action: 'POST /v1/envs/exec', outcome: 'ok',
+        remote, detail: { envId: id, command: body.command.join(' ').slice(0, 200) },
+      });
+      return send(res, 200, await svc.exec(p, id, body.command));
+    }
+    throw new HttpError(404, `no route for ${url.pathname}`);
+  }
+
+  /* ------------------------------------------------------------- images */
+  if (resource === 'images') {
+    if (!d.envs) throw new HttpError(503, 'environments are not enabled');
+    const p = toPrincipal(who);
+    if (method === 'GET') {
+      d.tokens.require(who, 'envs:read');
+      return send(res, 200, await d.envs.service.listImages(p));
+    }
+    if (method === 'POST') {
+      // Building names a path on this Mac and runs its Dockerfile, which is
+      // code execution as you -- the same reasoning that keeps
+      // runs:submit:local out of the remote preset.
+      d.tokens.require(who, 'envs:write');
+      const body = await readJson<{ contextPath?: string; tag?: string; dockerfile?: string; buildArgs?: Record<string, string> }>(req);
+      if (!body.contextPath || !body.tag) throw new HttpError(400, 'contextPath and tag are required');
+      return send(res, 200, await d.envs.service.buildImage(p, {
+        contextPath: body.contextPath,
+        tag: body.tag,
+        ...(body.dockerfile ? { dockerfile: body.dockerfile } : {}),
+        ...(body.buildArgs ? { buildArgs: body.buildArgs } : {}),
+      }));
+    }
+    throw new HttpError(405, `${method} not allowed on /v1/images`);
   }
 
   /* ---------------------------------------------------------- artifacts */

@@ -20,6 +20,9 @@ export const CAPABILITIES = [
   'pool:read',
   'pool:write',             // add or remove simulators
   'inspect',                // read the live screen of a pooled simulator
+  'envs:read',              // list environments, read their logs and state
+  'envs:write',             // provision and destroy environments
+  'envs:exec',              // run arbitrary commands inside a running environment
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -34,8 +37,11 @@ export type Capability = (typeof CAPABILITIES)[number];
  */
 export const PRESETS: Record<string, Capability[]> = {
   full: [...CAPABILITIES],
-  remote: ['runs:submit:artifact', 'runs:submit:url', 'runs:submit:installed', 'runs:read', 'runs:cancel', 'artifacts:write', 'pool:read'],
-  readonly: ['runs:read', 'pool:read'],
+  // `remote` gets envs:read but not envs:write, for the same reason it does not
+  // get runs:submit:local: provisioning an arbitrary image runs someone else's
+  // code on this Mac and reaches this LAN from inside it. Reading is harmless.
+  remote: ['runs:submit:artifact', 'runs:submit:url', 'runs:submit:installed', 'runs:read', 'runs:cancel', 'artifacts:write', 'pool:read', 'envs:read'],
+  readonly: ['runs:read', 'pool:read', 'envs:read'],
 };
 
 export interface TokenRecord {

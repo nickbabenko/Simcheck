@@ -137,6 +137,32 @@ export interface Config {
   maxArtifactBytes: number;
   /** Delete uploaded artifacts older than this. 0 keeps them forever. */
   artifactRetentionDays: number;
+
+  /* ------------------------------------------------------- environments */
+  /** Disposable backend environments. Off unless a container runtime is
+   *  configured, since the daemon must stay useful on a Mac without one. */
+  envEnabled: boolean;
+  /** Environments publish at <slug>.<envBaseDomain>. */
+  envBaseDomain: string;
+  /** Docker Engine API socket or tcp address. podman and OrbStack both serve it. */
+  envDockerHost: string;
+  envCaddyAdmin: string;
+  envIngressListen: string[];
+  /** Wildcard certificate for *.<envBaseDomain>. A per-env certificate would be
+   *  published to Certificate Transparency logs and make every slug
+   *  enumerable, so this is a wildcard or nothing. */
+  envTlsCert: string;
+  envTlsKey: string;
+  /** Registry to push built images to. Empty keeps images local. */
+  envRegistry: string;
+  /** Deliberately low. Each environment competes with the simulator pool for
+   *  the same RAM on this one Mac. */
+  envMaxConcurrent: number;
+  envDefaultTtlSeconds: number;
+  envMaxTtlSeconds: number;
+  envMaxMemoryMb: number;
+  envMinFreeMemoryMb: number;
+  envProvisionTimeoutMs: number;
 }
 
 const HOME = process.env.SIMCHECK_HOME || path.join(os.homedir(), '.simcheck');
@@ -188,13 +214,29 @@ const DEFAULTS: Config = {
   allowedBuildHosts: [],
   maxArtifactBytes: 1_073_741_824,   // 1 GiB
   artifactRetentionDays: 14,
+
+  envEnabled: false,
+  envBaseDomain: 'env.localhost',
+  envDockerHost: '/var/run/docker.sock',
+  envCaddyAdmin: 'http://127.0.0.1:2019',
+  envIngressListen: [':8080'],
+  envTlsCert: '',
+  envTlsKey: '',
+  envRegistry: '',
+  envMaxConcurrent: 2,
+  envDefaultTtlSeconds: 900,
+  envMaxTtlSeconds: 14400,
+  envMaxMemoryMb: 1024,
+  envMinFreeMemoryMb: 1024,
+  envProvisionTimeoutMs: 180_000,
 };
 
-const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms']);
-const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision']);
+const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms', 'envIngressListen']);
+const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision', 'envEnabled']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
   'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb',
-  'androidBootTimeoutMs']);
+  'androidBootTimeoutMs', 'envMaxConcurrent', 'envDefaultTtlSeconds', 'envMaxTtlSeconds',
+  'envMaxMemoryMb', 'envMinFreeMemoryMb', 'envProvisionTimeoutMs']);
 
 /** Precedence: env > ~/.simcheck/config.json > defaults. */
 export function loadConfig(): Config {
