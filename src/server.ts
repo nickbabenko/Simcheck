@@ -5,6 +5,7 @@ import type { Config } from './config.js';
 import type { Pool } from './pool.js';
 import type { Store } from './store.js';
 import { validateSteps } from './steps.js';
+import { assertSafeLaunchOptions } from './launchguard.js';
 import type { Runner } from './runner.js';
 import type { Scheduler } from './scheduler.js';
 import type { AppSpec, Run, RunRequest, Step } from './types.js';
@@ -492,6 +493,14 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
   // Pin it onto the request so the pool leases the right kind of device even
   // when the caller left `device` off entirely.
   body.device = { ...body.device, platform };
+
+  // Once the platform is known, since Android refuses two more keys. The
+  // executor checks again at the launch itself.
+  try {
+    assertSafeLaunchOptions(body, platform);
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
 
   // Resolve the build host now rather than at run time: a caller should learn
   // straight away that a URL is unreachable, instead of polling a run that was

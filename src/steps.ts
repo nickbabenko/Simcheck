@@ -7,6 +7,7 @@ import { renderScreen, type Screen } from './screen.js';
 import { sleep, slug, nowIso } from './util.js';
 import { logger } from './log.js';
 import { acceptOpenIn } from './ios/consent.js';
+import { assertSafeLaunchArgs, assertSafeLaunchEnv } from './launchguard.js';
 
 const log = logger('steps');
 
@@ -95,20 +96,32 @@ export class StepExecutor {
     }
   }
 
+  /**
+   * The one way the app is started. The caller's env and args are checked
+   * here as well as at submit: a launch step the NL agent emits never passed
+   * through submit, and nothing that reaches a launch should skip the check.
+   */
+  private async launchApp(args: string[], env: Record<string, string>): Promise<number> {
+    assertSafeLaunchEnv(env, 'launch env', this.devices.platform);
+    assertSafeLaunchArgs(args, 'launch args');
+
+    return this.devices.launch(this.ctx.udid, this.ctx.app, args, env);
+  }
+
   /** Returns a description of what was actually driven, where that differs
    *  from what was asked for. Anything else traces as the step itself. */
   private async dispatch(step: Step): Promise<string | void> {
     const { udid, app, signal } = this.ctx;
     switch (step.action) {
       case 'launch':
-        await this.devices.launch(udid, app, step.args ?? this.ctx.launchArgs, step.env ?? this.ctx.launchEnv);
+        await this.launchApp(step.args ?? this.ctx.launchArgs, step.env ?? this.ctx.launchEnv);
         await sleep(1200, signal);
         return;
 
       case 'relaunch':
         await this.devices.terminate(udid, app.appId);
         await sleep(400, signal);
-        await this.devices.launch(udid, app, this.ctx.launchArgs, this.ctx.launchEnv);
+        await this.launchApp(this.ctx.launchArgs, this.ctx.launchEnv);
         await sleep(1200, signal);
         return;
 
