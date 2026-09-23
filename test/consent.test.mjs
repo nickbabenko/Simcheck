@@ -81,6 +81,22 @@ test('acceptOpenIn retries a read that fails while the sheet animates in', async
   assert.deepEqual(ui.taps, [{ x: 275, y: 474 }], 'tapped Open by its point, once');
 });
 
+test('a failed read slower than the window does not use it up', async () => {
+  // As measured: the first read with the sheet up takes ~4.5s and then fails.
+  const ui = scriptedUi([new Error('No translation object returned for simulator'), sheetScreen()]);
+  const slow = ui.describe;
+  let n = 0;
+  ui.describe = async () => { if (n++ === 0) await new Promise((r) => setTimeout(r, 60)); return slow(); };
+  assert.equal(await acceptOpenIn(ui, { windowMs: 20, pollMs: 1 }), 'Open in “Greyfix”?');
+  assert.equal(ui.taps.length, 1);
+});
+
+test('reads that keep failing give up without tapping', async () => {
+  const ui = scriptedUi([new Error('Failed to connect to the simulator')]);
+  assert.equal(await acceptOpenIn(ui, { windowMs: 10, pollMs: 1 }), null);
+  assert.equal(ui.taps.length, 0);
+});
+
 test('acceptOpenIn gives up quietly when no sheet comes (http links)', async () => {
   const ui = scriptedUi([emptyScreen]);
   assert.equal(await acceptOpenIn(ui, { windowMs: 30, pollMs: 5 }), null);

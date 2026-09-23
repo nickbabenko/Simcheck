@@ -60,8 +60,11 @@ export function findOpenInSheet(screen: Screen): OpenInSheet | null {
 }
 
 export interface ConsentOptions {
-  /** How long to look for the sheet after `openurl` returns. */
+  /** How long to keep looking, after `openurl` returns, while reads succeed
+   *  and show no sheet. */
   windowMs?: number;
+  /** Hard cap including failed reads, which do not use up the window. */
+  maxMs?: number;
   /** Pause between reads. describe-ui itself takes ~350ms. */
   pollMs?: number;
   signal?: AbortSignal;
@@ -71,22 +74,31 @@ export interface ConsentOptions {
  * After an `openurl`, watch briefly for the consent sheet and tap Open.
  * Returns the sheet's title if one was answered, else null.
  *
- * describe-ui can fail outright while the sheet animates in ("No translation
- * object returned for simulator ... fullscreen dialog"), so a failed read is
- * retried within the window rather than taken as "no sheet".
+ * Measured on iOS 26.3: the first describe-ui after the sheet comes up can
+ * take ~4.5s and then fail outright ("No translation object returned for
+ * simulator ... fullscreen dialog"); the next read, ~1s later, succeeds and
+ * shows the sheet. So a failed read says "look again", not "no sheet", and
+ * does not use up the window -- only a successful read showing no sheet does.
  */
 export async function acceptOpenIn(ui: UiDriver, opts: ConsentOptions = {}): Promise<string | null> {
+  const started = Date.now();
   const windowMs = opts.windowMs ?? 2000;
+  const hardStop = started + Math.max(opts.maxMs ?? 15_000, windowMs);
   const pollMs = opts.pollMs ?? 250;
-  const deadline = Date.now() + windowMs;
+  let failures = 0;
   for (;;) {
     const screen = await ui.describe(opts.signal).catch(() => null);
-    const sheet = screen && findOpenInSheet(screen);
-    if (sheet) {
-      await ui.tap({ x: sheet.open.center.x, y: sheet.open.center.y }, opts.signal);
-      return sheet.title;
+    if (screen) {
+      const sheet = findOpenInSheet(screen);
+      if (sheet) {
+        await ui.tap({ x: sheet.open.center.x, y: sheet.open.center.y }, opts.signal);
+        return sheet.title;
+      }
+      if (Date.now() - started >= windowMs) return null;
+    } else if (++failures >= 4) {
+      return null;
     }
-    if (Date.now() >= deadline || opts.signal?.aborted) return null;
+    if (Date.now() >= hardStop || opts.signal?.aborted) return null;
     await sleep(pollMs, opts.signal);
   }
 }
