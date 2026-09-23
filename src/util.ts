@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 export interface ExecResult { code: number; stdout: string; stderr: string; timedOut: boolean }
 
@@ -98,3 +99,35 @@ export class HttpError extends Error {
 /** Filesystem-safe slug for screenshot names. */
 export const slug = (s: string): string =>
   s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || 'shot';
+
+/**
+ * Unpack a zip into `dest`.
+ *
+ * On macOS, ditto: it keeps what a simulator .app needs from the archive
+ * (extended attributes, resource forks, symlinks inside frameworks). ditto
+ * does not exist on Linux, where Android runs, so there it is Info-ZIP's
+ * unzip, which refuses entries that climb out of `dest`. unzip exits 1 for
+ * "warnings, but everything that could be extracted was", such as a skipped
+ * `../` entry; only 2 and above is a failure.
+ */
+export async function unzipArchive(
+  archive: string, dest: string,
+  opts: { timeoutMs?: number; platform?: NodeJS.Platform } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 600_000;
+
+  if ((opts.platform ?? process.platform) === 'darwin') {
+    await execOk('/usr/bin/ditto', ['-x', '-k', archive, dest], { timeoutMs });
+    return;
+  }
+
+  // ditto creates missing parents; unzip creates only the last level.
+  fs.mkdirSync(dest, { recursive: true });
+  const r = await exec('unzip', ['-q', '-o', archive, '-d', dest], { timeoutMs });
+  if (r.code === 0 || r.code === 1) return;
+
+  const why = r.timedOut ? 'timed out'
+    : r.code === -1 ? 'could not be run (install it: apt install unzip)'
+    : `exited ${r.code}`;
+  throw new Error(`unzip ${archive} ${why}: ${(r.stderr || r.stdout).trim().slice(0, 2000)}`);
+}

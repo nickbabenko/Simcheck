@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import * as simctl from './simctl.js';
 import type { PrepareAppContext, PreparedApp } from '../device.js';
 import { fetchBuild, resolveGithubArtifact } from '../fetchbuild.js';
-import { exec, execOk } from '../util.js';
+import { exec, execOk, unzipArchive } from '../util.js';
 import { logger } from '../log.js';
 
 const log = logger('build');
@@ -120,7 +120,7 @@ async function resolveArtifact(cfg: Config, given: string): Promise<string> {
   if (!fs.existsSync(marker)) {
     fs.rmSync(dest, { recursive: true, force: true });
     fs.mkdirSync(dest, { recursive: true });
-    await execOk('/usr/bin/ditto', ['-x', '-k', abs, dest], { timeoutMs: 300_000 });
+    await unzipArchive(abs, dest, { timeoutMs: 300_000 });
     fs.writeFileSync(marker, abs);
   }
   const found = findApp(dest);

@@ -6,7 +6,7 @@ import { paths } from '../config.js';
 import type { AppSpec } from '../types.js';
 import type { PrepareAppContext, PreparedApp } from '../device.js';
 import { fetchBuild, resolveGithubArtifact } from '../fetchbuild.js';
-import { execOk } from '../util.js';
+import { unzipArchive } from '../util.js';
 import { logger } from '../log.js';
 import type { AndroidTools } from './sdk.js';
 import type { Adb } from './adb.js';
@@ -151,7 +151,7 @@ async function resolveArtifact(cfg: Config, given: string): Promise<string> {
   if (!fs.existsSync(marker)) {
     fs.rmSync(dest, { recursive: true, force: true });
     fs.mkdirSync(dest, { recursive: true });
-    await execOk('/usr/bin/ditto', ['-x', '-k', abs, dest], { timeoutMs: 300_000 });
+    await unzipArchive(abs, dest, { timeoutMs: 300_000 });
     fs.writeFileSync(marker, abs);
   }
   const found = findApk(dest);

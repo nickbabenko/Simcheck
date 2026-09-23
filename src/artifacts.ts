@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import type { Config } from './config.js';
 import type { PlatformId } from './device.js';
 import { paths } from './config.js';
-import { execOk, nowIso, HttpError } from './util.js';
+import { nowIso, HttpError, unzipArchive } from './util.js';
 import { logger } from './log.js';
 
 const log = logger('artifacts');
@@ -46,6 +46,10 @@ export type ManifestReader = (buildPath: string) => Promise<string>;
  */
 export class ArtifactStore {
   private root: string;
+
+  /** Which platform's unzip to use: ditto on macOS, unzip elsewhere. A
+   *  field so the tests can drive the Linux path on a Mac. */
+  unzipOn: NodeJS.Platform = process.platform;
 
   constructor(private cfg: Config) {
     this.root = path.join(cfg.home, 'artifacts');
@@ -128,7 +132,7 @@ export class ArtifactStore {
       fs.rmSync(dest, { recursive: true, force: true });
       fs.mkdirSync(dest, { recursive: true });
       const unpacked = path.join(dest, 'unpacked');
-      await execOk('/usr/bin/ditto', ['-x', '-k', staging, unpacked], { timeoutMs: 600_000 });
+      await unzipArchive(staging, unpacked, { platform: this.unzipOn });
 
       // An .apk is itself a zip, so unpacking one yields its contents rather
       // than a file. That is the tell: a manifest and dex at the top level
@@ -153,7 +157,7 @@ export class ArtifactStore {
         const inner = findZip(path.join(dest, 'unpacked'));
         if (inner) {
           log.info(`no .app at the top level; unwrapping nested ${path.basename(inner)}`);
-          await execOk('/usr/bin/ditto', ['-x', '-k', inner, path.join(dest, 'nested')], { timeoutMs: 600_000 });
+          await unzipArchive(inner, path.join(dest, 'nested'), { platform: this.unzipOn });
           appPath = findApp(path.join(dest, 'nested'));
         }
       }
