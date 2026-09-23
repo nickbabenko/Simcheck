@@ -638,6 +638,8 @@ simcheck token revoke cloud</code></pre>
 <pre><code>simcheck status                    daemon and pool state
 simcheck doctor                    toolchain, TLS path, exposure
 simcheck submit &lt;file.json&gt; --wait queue a run and follow it
+simcheck bench &lt;file.json&gt; -n 10   run it N times, per-phase timing table
+       [--reset relaunch] [--json]
 simcheck watch &lt;run-id&gt;            follow a run
 simcheck report &lt;run-id&gt;           markdown evidence
 simcheck inspect &lt;device&gt;          live accessibility tree
@@ -653,6 +655,7 @@ simcheck tunnel &lt;hostname&gt;         scaffold Cloudflare Tunnel + Access</co
 <pre><code>POST   /v1/runs                          submit; 202 with the run id
 GET    /v1/runs/:id                      full state
 GET    /v1/runs/:id/wait?timeoutMs=      long-poll until terminal
+       [&amp;settled=true]                   ...and until the device is reset
 GET    /v1/runs/:id/report               markdown
 GET    /v1/runs/:id/screenshots/:name    PNG
 DELETE /v1/runs/:id                      cancel
@@ -661,12 +664,21 @@ GET    /v1/pool                          pool state
 GET    /v1/whoami                        this token's capabilities
 GET    /health                           liveness</code></pre>
 
+<p>Every run carries <code>timings</code> (<code>queueMs</code>, <code>prepareMs</code>,
+  <code>installMs</code>, <code>launchMs</code>, <code>stepsMs</code>, <code>screenshotMs</code>,
+  <code>resetMs</code>, <code>occupancyMs</code>, <code>totalMs</code>); a pending run carries
+  <code>queuePositionForDevice</code>, <code>waitingFor</code> and, when it can be honest,
+  <code>etaSeconds</code>. <code>resetPolicy: "relaunch"</code> keeps the app installed so the
+  next relaunch run of the same build for the same tenant skips the install. See the README.</p>
+
 <h3>Actions available to a step or scenario</h3>
 <p>
   <code>tap</code> (by <code>id</code>, <code>label</code>, <code>value</code> or
   <code>x</code>/<code>y</code>), <code>type</code>, <code>clear_text</code>,
   <code>press_enter</code>, <code>swipe</code>, <code>gesture</code>,
   <code>button</code>, <code>wait</code>, <code>wait_for</code>,
+  <code>assert</code> (like <code>wait_for</code>, but a miss fails the run
+  rather than erroring it -- put one after every <code>open_url</code>),
   <code>screenshot</code>, <code>open_url</code>, <code>appearance</code>,
   <code>permission</code>, <code>launch</code>, <code>relaunch</code>,
   <code>terminate</code>, <code>describe_ui</code>.

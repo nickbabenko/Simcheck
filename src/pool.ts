@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from './config.js';
 import { paths, platformDefaults } from './config.js';
-import type { DeviceRequest, PooledDevice } from './types.js';
+import type { DeviceRequest, PooledDevice, ResetPolicy } from './types.js';
+import { leaseScore } from './warm.js';
 import type { ExistingDevice, PlatformId } from './device.js';
 import type { Platforms } from './platforms.js';
 import { statfsSync } from 'node:fs';
@@ -39,12 +40,19 @@ export class Pool {
   private lastShortfall?: string;
   private timer?: NodeJS.Timeout;
   private stopped = false;
+  /** False until the pool has reloaded and re-surveyed its devices. Until
+   *  then an empty device list means "not loaded yet", not "none exist", and
+   *  the scheduler must not provision or fail runs on the strength of it. */
+  private started = false;
 
   constructor(private cfg: Config, private platforms: Platforms) {}
+
+  get isStarted(): boolean { return this.started; }
 
   async start(): Promise<void> {
     this.load();
     await this.adopt();
+    this.started = true;
     void this.reconcile();
     this.timer = setInterval(() => void this.reconcile(), 5_000);
   }
@@ -73,6 +81,19 @@ export class Pool {
 
   canEverSatisfy(req?: DeviceRequest): boolean {
     return this.list().some((d) => d.status !== 'offline' && this.matches(d, req));
+  }
+
+  /** Non-offline devices that could serve a request. Two queued runs compete
+   *  with each other exactly when these sets overlap. */
+  matchingUdids(req?: DeviceRequest): Set<string> {
+    return new Set(this.list().filter((d) => d.status !== 'offline' && this.matches(d, req)).map((d) => d.udid));
+  }
+
+  /** Booted devices -- idle, running or resetting -- that could serve a
+   *  request. Zero means the request is waiting on a cold boot. */
+  warmCount(req?: DeviceRequest): number {
+    return this.list().filter((d) =>
+      (d.status === 'ready' || d.status === 'leased' || d.status === 'recycling') && this.matches(d, req)).length;
   }
 
   /** Requests we are already building a device for, so we do it once. */
@@ -162,17 +183,47 @@ export class Pool {
     }
   }
 
-  /** Take a ready device for a run, or null if none is free right now. */
-  lease(runId: string, req?: DeviceRequest): PooledDevice | null {
+  /**
+   * Take a ready device for a run, or null if none is free right now.
+   *
+   * With `prefer`, a ready device that already holds the run's build for its
+   * tenant wins, then one last used by that tenant, then a clean one, and a
+   * device carrying another tenant's residue comes last (it costs an erase).
+   * Only ever a tie-break among devices free now -- never a reason to wait.
+   */
+  lease(runId: string, req?: DeviceRequest, prefer?: { tenant: string; appHash?: string | undefined }): PooledDevice | null {
+    let best: PooledDevice | null = null;
+    let bestScore = -1;
     for (const d of this.list()) {
       if (d.status !== 'ready' || !this.matches(d, req)) continue;
-      d.status = 'leased';
-      d.currentRunId = runId;
-      this.save();
-      log.info(`leased ${d.name} (${d.deviceType}) to ${runId}`);
-      return d;
+      const score = prefer ? leaseScore(d, prefer) : 0;
+      if (score > bestScore) { best = d; bestScore = score; }
     }
-    return null;
+    if (!best) return null;
+    best.status = 'leased';
+    best.currentRunId = runId;
+    this.save();
+    log.info(`leased ${best.name} (${best.deviceType}) to ${runId}${prefer ? ` (affinity ${bestScore})` : ''}`);
+    return best;
+  }
+
+  /**
+   * Factory-reset a device a run is holding, before it installs anything:
+   * the device carries another tenant's residue, or unknown contents after a
+   * crash. Clears the cache record with it.
+   */
+  async eraseLeased(udid: string, signal?: AbortSignal): Promise<void> {
+    const d = this.devices.get(udid);
+    if (!d) throw new Error(`no pooled device ${udid}`);
+    const backend = this.platforms.get(d.platform).devices;
+    await backend.shutdown(udid);
+    if (signal?.aborted) throw new Error('aborted');
+    await backend.erase(udid);
+    await backend.boot(udid);
+    delete d.installed;
+    delete d.tenant;
+    delete d.dirty;
+    this.save();
   }
 
   /** Return a device to the pool, resetting it to a clean state first. */
@@ -180,7 +231,11 @@ export class Pool {
     bundleId?: string;
     /** False when the app was already on the device and is not ours to remove. */
     uninstall: boolean;
-    policy: 'uninstall' | 'erase';
+    policy: ResetPolicy;
+    /** The run's tenant, recorded when the run put its own build here. */
+    tenant?: string;
+    /** For `relaunch`: the build left installed, recorded as the cache. */
+    keep?: { bundleId: string; appHash: string };
   }): Promise<void> {
     const d = this.devices.get(udid);
     if (!d) return;
@@ -193,12 +248,23 @@ export class Pool {
         await backend.shutdown(udid);
         await backend.erase(udid);
         await backend.boot(udid);
+        delete d.installed;
+        delete d.tenant;
+        delete d.dirty;
       } else if (opts.bundleId) {
         await backend.terminate(udid, opts.bundleId);
-        if (opts.uninstall) {
+        if (opts.policy === 'relaunch' && opts.keep) {
+          // Leave it installed, with its data and grants, for the next
+          // relaunch run of the same build for the same tenant.
+          d.installed = { ...opts.keep, ...(opts.tenant ? { tenant: opts.tenant } : {}), installedAt: nowIso() };
+        } else if (opts.uninstall) {
           await backend.uninstall(udid, opts.bundleId);
           await backend.resetPermissions(udid, opts.bundleId);
+          if (d.installed?.bundleId === opts.bundleId) delete d.installed;
         }
+        // Uninstalling does not clear keychain items or the pasteboard, so
+        // whoever ran here still owns the device's residue.
+        if (opts.uninstall && opts.tenant) d.tenant = opts.tenant;
       }
       // Uninstalling an app does not dismiss a system alert it left on screen
       // -- that sheet belongs to the OS shell and would greet the next run.
@@ -356,7 +422,14 @@ export class Pool {
         this.devices.delete(udid);
         continue;
       }
-      // A lease cannot survive a restart -- the run that held it is gone.
+      // A lease cannot survive a restart -- the run that held it is gone, and
+      // whatever it installed was never reset. Mark the contents unknown, so
+      // the next run that installs anything erases it first.
+      if (d.status === 'leased' || d.status === 'recycling') {
+        d.dirty = true;
+        delete d.installed;
+        log.warn(`${d.name} was mid-run when the daemon stopped; marked dirty`);
+      }
       d.status = actual.d.booted ? 'ready' : 'pending';
       delete d.currentRunId;
     }
@@ -373,8 +446,10 @@ export class Pool {
         status: d.booted ? 'ready' : 'pending',
         addedAt: nowIso(),
         managed: true,
+        // An orphan's history is unknown by definition.
+        dirty: true,
       });
-      log.info(`adopted orphaned ${d.name}`);
+      log.info(`adopted orphaned ${d.name} (dirty)`);
     }
     this.save();
   }

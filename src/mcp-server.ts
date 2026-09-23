@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Client, RunView } from './client.js';
+import { ApiError } from './client.js';
 import type { RunRequest, Step } from './types.js';
 
 
@@ -100,24 +101,36 @@ export function createMcpServer(client: Client, opts: McpServerOptions = {}): Mc
       timeoutMs: z.number().optional(),
     }).optional().describe('iOS only: run an XCUITest bundle instead of driving the UI from outside. Use this when the claim needs an assertion the screen cannot settle -- that a gesture changed zoomScale, that a delegate fired, that state is correct rather than merely looking correct. XCUITest also has genuine multi-touch. Cannot be combined with scenario or steps.'),
     instrumentation: instrumentationSchema.optional(),
-    steps: z.array(z.record(z.string(), z.any())).optional().describe('Exact actions instead of a scenario. Each is {"action":"tap"|"type"|"screenshot"|"wait"|"wait_for"|"gesture"|"button"|"swipe"|"pinch"|"pan"|"two_finger_press"|"double_tap"|"open_url"|"appearance"|"launch"|"relaunch"|"terminate"|"clear_text"|"press_enter", ...}. Multi-touch (pinch, pan, two_finger_press, double_tap) is iOS-only and needs the baguette driver; on Android those steps fail with an explanation, because `adb shell input` drives a single pointer -- assert the gesture from an instrumentation test instead. Hardware buttons differ by platform: home/lock/side-button/siri/apple-pay on iOS, home/back/recents/power/volume-up/volume-down/menu on Android. Unknown keys are rejected rather than ignored.'),
+    steps: z.array(z.record(z.string(), z.any())).optional().describe('Exact actions instead of a scenario. Each is {"action":"tap"|"type"|"screenshot"|"wait"|"wait_for"|"gesture"|"button"|"swipe"|"pinch"|"pan"|"two_finger_press"|"double_tap"|"assert"|"open_url"|"appearance"|"launch"|"relaunch"|"terminate"|"clear_text"|"press_enter", ...}. Multi-touch (pinch, pan, two_finger_press, double_tap) is iOS-only and needs the baguette driver; on Android those steps fail with an explanation, because `adb shell input` drives a single pointer -- assert the gesture from an instrumentation test instead. Hardware buttons differ by platform: home/lock/side-button/siri/apple-pay on iOS, home/back/recents/power/volume-up/volume-down/menu on Android. Unknown keys are rejected rather than ignored. `assert` ({"action":"assert","id":"..."}) waits for an element like wait_for, but a miss FAILS the run as a verdict rather than erroring it -- put one straight after every open_url, since a deep link that does not land raises nothing.'),
     screenshots: z.array(z.string()).optional().describe('Names of the screenshots to capture, e.g. ["login", "settings", "dark-mode-on"].'),
     assert: z.string().optional().describe('What must hold for a pass, e.g. "the Settings screen renders with a dark background and the toggle reads On".'),
     device: deviceSchema.optional(),
     timeoutMs: z.number().optional().describe('Hard limit on the whole run. Default 10 minutes.'),
     maxActions: z.number().optional().describe('Cap on device actions in scenario mode. Default 60.'),
-    resetPolicy: z.enum(['uninstall', 'erase']).optional().describe('"uninstall" (fast, default) or "erase" for a full factory reset between runs.'),
+    resetPolicy: z.enum(['uninstall', 'erase', 'relaunch']).optional().describe('"uninstall" (fast, default), "erase" for a full factory reset between runs, or "relaunch" to leave the app installed so the next relaunch run of the same build skips the install (it then starts from the app\'s persisted state, not a fresh install).'),
+    tenant: z.string().optional().describe('Only for a token submitting on behalf of several customers: who this run is for. A device last used by another tenant is erased before install.'),
     label: z.string().optional().describe('Short human label, shown in listings and on the report.'),
   };
 
   const submitRun = async (args: unknown) => {
     const request = args as unknown as RunRequest;
     if (request.steps) request.steps = request.steps as unknown as Step[];
-    const run = await client.submit(request);
+    let run: RunView;
+    try {
+      run = await client.submit(request);
+    } catch (e) {
+      // A limit is an answer an agent can act on, not a tool failure: hand
+      // back the structured fields rather than a string to pattern-match.
+      if (e instanceof ApiError && e.status === 429 && e.detail) {
+        return json({ rejected: true, ...e.detail, message: e.message });
+      }
+      throw e;
+    }
     return json({
       runId: run.id,
       status: run.status,
       queuePosition: run.queuePosition ?? 0,
+      ...queueFields(run),
       mode: run.mode,
       platform: run.device?.platform ?? run.request.device?.platform ?? null,
       next: `Call wait_for_test_run with runId "${run.id}".`,
@@ -574,7 +587,7 @@ function outcome(run: RunView) {
     status: run.status,
     done: run.done,
     passed: run.status === 'passed',
-    ...(run.done ? {} : { queuePosition: run.queuePosition ?? null }),
+    ...(run.done ? {} : { queuePosition: run.queuePosition ?? null, ...queueFields(run) }),
     summary: run.verdict?.summary ?? run.error ?? null,
     evidence: run.verdict?.evidence ?? null,
     device: run.device?.name ?? null,
@@ -583,10 +596,28 @@ function outcome(run: RunView) {
       (w) => !run.screenshots.some((s) => s.name === w)),
     actionsUsed: run.actionsUsed ?? null,
     ...(run.tests ? { tests: run.tests } : {}),
+    ...(run.timings ? { timings: run.timings } : {}),
+    ...(run.warm ? { warm: run.warm } : {}),
     reportPath: run.artifacts.report ? `${run.dir}/${run.artifacts.report}` : null,
     ...(run.done && run.status !== 'passed'
       ? { hint: 'Read get_test_report for the full trace, and get_test_screenshot to see what the app actually showed.' }
       : {}),
+  };
+}
+
+/** Device-aware queue fields, plus a sentence an agent can relay verbatim. */
+function queueFields(run: RunView) {
+  if (run.status !== 'pending' || run.queuePositionForDevice === undefined) return {};
+  const ahead = run.queuePositionForDevice;
+  const label = run.waitingFor === 'device_boot'
+    ? 'waiting for a device to be created and booted -- no estimate across a cold boot'
+    : `${ahead === 0 ? 'next' : `${ahead} ahead`} in line for a device` +
+      (run.etaSeconds !== undefined ? `, ~${run.etaSeconds}s (from ${run.etaSamples} recent runs)` : ', no estimate yet');
+  return {
+    queuePositionForDevice: ahead,
+    waitingFor: run.waitingFor,
+    ...(run.etaSeconds !== undefined ? { etaSeconds: run.etaSeconds } : {}),
+    queueLabel: label,
   };
 }
 

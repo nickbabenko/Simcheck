@@ -29,6 +29,10 @@ export const noTouchDriver = (platform: string): string =>
       'two-finger pan and a real double tap cannot be expressed through it. Assert the gesture from inside ' +
       'the app with an instrumentation test instead, which has genuine multi-touch.';
 
+/** An `assert` step whose element never appeared: a verdict on the app, so
+ *  the run fails rather than errors. */
+export class AssertionFailed extends Error {}
+
 /**
  * Executes one `Step` against a leased simulator, recording it into the run so
  * that a natural-language scenario ends up with a replayable step list.
@@ -216,7 +220,19 @@ export class StepExecutor {
         return;
       }
 
+      case 'assert': {
+        const want = step.id ? `#${step.id}` : `"${step.label}"`;
+        const found = await this.ui.waitFor(step, step.timeoutMs ?? 10_000, signal);
+        // An abort is the run's timeout, not the app's failure.
+        if (!found && !signal.aborted) {
+          throw new AssertionFailed(`${want} did not appear within ${step.timeoutMs ?? 10_000}ms` +
+            (step.note ? ` (${step.note})` : ''));
+        }
+        return `assert ${want} is on screen -- it is`;
+      }
+
       case 'screenshot':
+        // capture() writes its own trace line, timed.
         await this.capture(step.name, step.note);
         return;
 
@@ -252,6 +268,7 @@ export class StepExecutor {
 
   /** Save a named PNG into the run directory and index it on the run. */
   async capture(name: string, note?: string): Promise<string> {
+    const started = Date.now();
     const run = this.store.get(this.ctx.runId);
     const base = slug(name);
     const taken = new Set((run?.screenshots ?? []).map((s) => s.name));
@@ -275,7 +292,11 @@ export class StepExecutor {
       run.screenshots.push({ name: unique, file: rel, at: nowIso(), ...(note ? { note } : {}) });
       this.store.persist(run);
     }
-    this.store.trace(this.ctx.runId, { kind: 'screenshot', text: `captured "${unique}"`, screenshot: rel });
+    // Timed here, not in run(): record() skips a successful screenshot step
+    // because this line already describes it, which used to drop its time.
+    this.store.trace(this.ctx.runId, {
+      kind: 'screenshot', text: `captured "${unique}"`, screenshot: rel, durationMs: Date.now() - started,
+    });
     return abs;
   }
 
@@ -320,6 +341,7 @@ export const STEP_KEYS: Record<string, readonly string[]> = {
   button: ['button', 'durationMs'],
   wait: ['ms', 'note'],
   wait_for: ['id', 'label', 'timeoutMs'],
+  assert: ['id', 'label', 'timeoutMs', 'note'],
   screenshot: ['name', 'note'],
   open_url: ['url'],
   appearance: ['mode'],
@@ -347,6 +369,7 @@ const STEP_REQUIRED: Record<string, readonly string[]> = {
 const STEP_ONE_OF: Record<string, readonly string[]> = {
   tap: ['id', 'label', 'value', 'x'],
   wait_for: ['id', 'label'],
+  assert: ['id', 'label'],
   double_tap: ['id', 'label', 'x'],
 };
 
@@ -470,6 +493,27 @@ function describePinchDrive(r: ResolvedPinch, droveMs: number): string {
     `drove ${(droveMs / 1000).toFixed(2)}s`;
 }
 
+/**
+ * Warnings for an `open_url` that nothing verifies. A deep link that does not
+ * land raises no error -- the app simply stays where it was -- so without a
+ * `wait_for`/`assert` straight after it, a steps run passes regardless.
+ */
+export function lintDeepLinks(steps: readonly Step[]): string[] {
+  const out: string[] = [];
+  steps.forEach((step, i) => {
+    if (step.action !== 'open_url') return;
+    // Screenshots and plain waits in between do not verify anything.
+    let j = i + 1;
+    while (j < steps.length && (steps[j]!.action === 'screenshot' || steps[j]!.action === 'wait')) j++;
+    const next = steps[j];
+    if (next && (next.action === 'assert' || next.action === 'wait_for')) return;
+    out.push(`steps[${i}] opens ${step.url} but nothing checks it landed -- add an ` +
+      '{"action":"assert","id":"..."} naming an element unique to the destination screen, ' +
+      'or a deep link that silently does nothing still passes');
+  });
+  return out;
+}
+
 /** Human-readable one-liner for the report. */
 export function describeStep(step: Step): string {
   switch (step.action) {
@@ -481,6 +525,7 @@ export function describeStep(step: Step): string {
     case 'type': return `type ${JSON.stringify(step.text.length > 60 ? step.text.slice(0, 60) + '...' : step.text)}`;
     case 'wait': return `wait ${step.ms}ms`;
     case 'wait_for': return `wait for ${step.id ?? step.label}`;
+    case 'assert': return `assert ${step.id ? `#${step.id}` : `"${step.label}"`} is on screen`;
     case 'screenshot': return `screenshot "${step.name}"`;
     case 'gesture': return `gesture ${step.preset}`;
     case 'pinch': {

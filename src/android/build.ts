@@ -22,7 +22,7 @@ export async function prepareApp(
 ): Promise<PreparedApp> {
   const { deviceId: avd, runDir, signal, artifacts } = ctx;
 
-  const fromApk = async (apkPath: string, buildLog?: string): Promise<PreparedApp> => {
+  const fromApk = async (apkPath: string, buildLog?: string, contentHash?: string): Promise<PreparedApp> => {
     const info = await readApk(tools, apkPath);
 
     // The Android counterpart of the .ipa check: an x86_64-only APK installs
@@ -58,6 +58,7 @@ export async function prepareApp(
       ...(info.launchActivity ? { activity: info.launchActivity } : {}),
       preinstalled: false,
       ...(buildLog ? { buildLog } : {}),
+      ...(contentHash ? { contentHash } : {}),
     };
   };
 
@@ -72,7 +73,7 @@ export async function prepareApp(
       ...(resolved.label ? { label: resolved.label } : {}),
       ...(spec.urlHeaders ? { headers: spec.urlHeaders } : {}),
     }, signal);
-    return fromApk(fetched.appPath);
+    return fromApk(fetched.appPath, undefined, fetched.id);
   }
 
   // An uploaded build: already unpacked and validated at upload time.
@@ -85,7 +86,7 @@ export async function prepareApp(
         `so it cannot run on an emulator`);
     }
     if (!fs.existsSync(artifact.appPath)) throw new Error(`artifact ${artifact.id} is registered but its .apk is missing on disk`);
-    return fromApk(artifact.appPath);
+    return fromApk(artifact.appPath, undefined, artifact.id);
   }
 
   // Nothing to build or copy: the app is already on the emulator.
@@ -107,7 +108,12 @@ export async function prepareApp(
     };
   }
 
-  if (spec.path) return fromApk(await resolveArtifact(cfg, spec.path));
+  if (spec.path) {
+    const apk = await resolveArtifact(cfg, spec.path);
+    // An .apk is one file, so hashing it is cheap next to installing it.
+    const digest = crypto.createHash('sha256').update(fs.readFileSync(apk)).digest('hex').slice(0, 32);
+    return fromApk(apk, undefined, `apk-${digest}`);
+  }
 
   const built = await assemble(tools, {
     projectDir: spec.project!,

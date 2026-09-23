@@ -8,7 +8,7 @@ import { validateSteps } from './steps.js';
 import type { Runner } from './runner.js';
 import type { Scheduler } from './scheduler.js';
 import type { AppSpec, Run, RunRequest, Step } from './types.js';
-import { isTerminal } from './types.js';
+import { isTerminal, isSettled, RESET_POLICIES } from './types.js';
 import type { PlatformId } from './device.js';
 import type { Platforms } from './platforms.js';
 import { HttpError, newId, nowIso } from './util.js';
@@ -54,7 +54,12 @@ export function createServer(d: Deps): http.Server {
         });
       }
       if (status >= 500) log.error(`${req.method} ${req.url}`, (e as Error).stack ?? String(e));
-      send(res, status, { error: (e as Error).message });
+      // Structured fields ride alongside the message, never instead of it.
+      const detail = e instanceof HttpError || e instanceof AuthError ? e.detail : undefined;
+      if (detail?.retryAfterSeconds !== undefined && !res.headersSent) {
+        res.setHeader('retry-after', String(detail.retryAfterSeconds));
+      }
+      send(res, status, { error: (e as Error).message, ...(detail ?? {}) });
     });
   });
 }
@@ -324,9 +329,12 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
     }
 
     // Long-poll: hold the connection until the run reaches a terminal state.
+    // With settled=true, hold on until the device is also reset and back in
+    // the pool, so timings.resetMs / occupancyMs are final.
     if (method === 'GET' && sub === 'wait') {
       const timeoutMs = Math.min(Number(url.searchParams.get('timeoutMs') ?? 120_000), 600_000);
-      const final = await waitForTerminal(d, run.id, timeoutMs);
+      const settled = url.searchParams.get('settled') === 'true' || url.searchParams.get('settled') === '1';
+      const final = await waitForTerminal(d, run.id, timeoutMs, settled);
       return send(res, 200, publicRun(d, final));
     }
 
@@ -498,8 +506,11 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
     const mine = d.store.list().filter(
       (r) => r.submittedBy?.tokenId === who.id && !isTerminal(r.status)).length;
     if (mine >= who.maxConcurrentRuns) {
+      // No retryAfterSeconds: nothing says when one of this token's runs will
+      // finish, and a made-up number is worse than none.
       throw new HttpError(429,
-        `token "${who.name}" already has ${mine} runs in flight (limit ${who.maxConcurrentRuns}). Wait for one to finish.`);
+        `token "${who.name}" already has ${mine} runs in flight (limit ${who.maxConcurrentRuns}). Wait for one to finish.`,
+        { code: 'max_concurrent_runs', limit: who.maxConcurrentRuns, current: mine });
     }
   }
   d.tokens.checkRate(who);
@@ -616,6 +627,12 @@ function validate(d: Deps, body: RunRequest): void {
   if (body.scenario && body.steps?.length) {
     throw new HttpError(400, '`scenario` and `steps` are mutually exclusive');
   }
+  if (body.resetPolicy !== undefined && !RESET_POLICIES.includes(body.resetPolicy)) {
+    throw new HttpError(400, `resetPolicy must be one of: ${RESET_POLICIES.join(', ')}`);
+  }
+  if (body.tenant !== undefined && (typeof body.tenant !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.tenant))) {
+    throw new HttpError(400, 'tenant must be 1-128 characters of letters, digits, dot, dash, underscore or colon');
+  }
   if (body.scenario && !d.llmName) {
     throw new HttpError(503, 'this daemon has no LLM backend, so natural-language scenarios are unavailable -- submit explicit `steps` instead, or set ANTHROPIC_API_KEY and restart');
   }
@@ -642,14 +659,15 @@ function validate(d: Deps, body: RunRequest): void {
   }
 }
 
-function waitForTerminal(d: Deps, runId: string, timeoutMs: number): Promise<Run> {
+function waitForTerminal(d: Deps, runId: string, timeoutMs: number, settled = false): Promise<Run> {
+  const finished = (run: Run) => (settled ? isSettled(run) : isTerminal(run.status));
   return new Promise((resolve) => {
     const current = d.store.get(runId)!;
-    if (isTerminal(current.status)) return resolve(current);
+    if (finished(current)) return resolve(current);
 
     const done = (run: Run) => { cleanup(); resolve(run); };
     const off = d.store.onChange((run) => {
-      if (run.id === runId && isTerminal(run.status)) done(run);
+      if (run.id === runId && finished(run)) done(run);
     });
     const timer = setTimeout(() => { cleanup(); resolve(d.store.get(runId)!); }, timeoutMs);
     function cleanup() { off(); clearTimeout(timer); }
@@ -671,11 +689,12 @@ const poolView = (d: Deps) => {
 
 /** Run plus the derived fields a polling client wants. */
 function publicRun(d: Deps, run: Run) {
-  const position = run.status === 'pending' ? d.scheduler.queuePosition(run.id) : -1;
+  const queue = run.status === 'pending' ? d.scheduler.queueInfo(run.id) : null;
   return {
     ...run,
     done: isTerminal(run.status),
-    ...(position >= 0 ? { queuePosition: position } : {}),
+    settled: isSettled(run),
+    ...(queue ?? {}),
     links: {
       self: `/v1/runs/${run.id}`,
       wait: `/v1/runs/${run.id}/wait`,
@@ -699,6 +718,8 @@ const summarise = (d: Deps, run: Run) => ({
   device: run.device?.name ?? null,
   screenshots: run.screenshots.length,
   summary: run.verdict?.summary ?? run.error ?? null,
+  ...(run.timings?.occupancyMs !== undefined ? { occupancyMs: run.timings.occupancyMs } : {}),
+  ...(run.status === 'pending' ? { queuePosition: d.scheduler.queuePosition(run.id) } : {}),
 });
 
 function bearer(req: http.IncomingMessage): string {

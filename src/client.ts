@@ -3,10 +3,19 @@ import type { Config } from './config.js';
 import { baseUrl, readToken } from './config.js';
 import type { PooledDevice, Run, RunRequest } from './types.js';
 import type { PlatformId } from './device.js';
+import type { ErrorDetail } from './util.js';
 
 export interface RunView extends Run {
   done: boolean;
+  /** Terminal and the device reset: timings are final. */
+  settled?: boolean;
+  /** While pending: index in the whole queue, 0 = next. */
   queuePosition?: number;
+  /** While pending: older runs competing for the same devices. */
+  queuePositionForDevice?: number;
+  waitingFor?: 'device' | 'device_boot';
+  etaSeconds?: number;
+  etaSamples?: number;
   dir: string;
   links: { self: string; wait: string; report: string; screenshots: { name: string; url: string }[] };
 }
@@ -61,6 +70,12 @@ export interface WhoAmI {
   limits: { maxConcurrentRuns: number; maxRunsPerHour: number };
 }
 
+/** A refusal from the daemon, keeping its structured fields (a 429's code,
+ *  limit, current, retryAfterSeconds) instead of flattening them to text. */
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public detail?: ErrorDetail) { super(message); }
+}
+
 export class DaemonDownError extends Error {
   constructor(url: string, cause: string) {
     super(`no simcheck daemon at ${url} (${cause}). Start one with: simcheck start`);
@@ -96,8 +111,20 @@ export class Client {
     const text = await res.text();
     if (!res.ok) {
       let message = text;
-      try { message = (JSON.parse(text) as { error?: string }).error ?? text; } catch { /* not JSON */ }
-      throw new Error(`${method} ${route} -> ${res.status}: ${message}`);
+      let detail: ErrorDetail | undefined;
+      try {
+        const body = JSON.parse(text) as { error?: string } & Partial<ErrorDetail>;
+        message = body.error ?? text;
+        if (typeof body.code === 'string') {
+          detail = {
+            code: body.code,
+            ...(typeof body.limit === 'number' ? { limit: body.limit } : {}),
+            ...(typeof body.current === 'number' ? { current: body.current } : {}),
+            ...(typeof body.retryAfterSeconds === 'number' ? { retryAfterSeconds: body.retryAfterSeconds } : {}),
+          };
+        }
+      } catch { /* not JSON */ }
+      throw new ApiError(`${method} ${route} -> ${res.status}: ${message}`, res.status, detail);
     }
     return (text ? JSON.parse(text) : {}) as T;
   }
@@ -237,19 +264,23 @@ export class Client {
     return this.call('DELETE', `/v1/runs/${id}`);
   }
 
-  /** One long-poll leg. Returns as soon as the run finishes, or on timeout. */
-  waitOnce(id: string, timeoutMs = 120_000): Promise<RunView> {
-    return this.call('GET', `/v1/runs/${id}/wait?timeoutMs=${timeoutMs}`, undefined, timeoutMs + 15_000);
+  /** One long-poll leg. Returns as soon as the run finishes (or, with
+   *  `settled`, once its device is reset too), or on timeout. */
+  waitOnce(id: string, timeoutMs = 120_000, settled = false): Promise<RunView> {
+    return this.call('GET', `/v1/runs/${id}/wait?timeoutMs=${timeoutMs}${settled ? '&settled=true' : ''}`,
+      undefined, timeoutMs + 15_000);
   }
 
   /** Long-poll repeatedly until the run is done or the overall deadline passes. */
-  async wait(id: string, overallMs: number, onTick?: (run: RunView) => void): Promise<RunView> {
+  async wait(id: string, overallMs: number, onTick?: (run: RunView) => void, settled = false): Promise<RunView> {
     const deadline = Date.now() + overallMs;
     for (;;) {
       const leg = Math.min(60_000, Math.max(1_000, deadline - Date.now()));
-      const run = await this.waitOnce(id, leg);
+      const run = await this.waitOnce(id, leg, settled);
       onTick?.(run);
-      if (run.done || Date.now() >= deadline) return run;
+      // An older daemon has no `settled`; fall back to done.
+      const finished = settled ? (run.settled ?? run.done) : run.done;
+      if (finished || Date.now() >= deadline) return run;
     }
   }
 

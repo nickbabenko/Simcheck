@@ -179,6 +179,11 @@ export interface PreparedApp {
   buildLog?: string;
   /** True when we did not install it, and so must not uninstall it either. */
   preinstalled: boolean;
+  /** Stable identity of the build's content, when it has one cheaply: the
+   *  artifact id (a sha256) for uploaded or fetched builds, the zip digest for
+   *  a local zip. Absent for a source build or a bare .app directory, which
+   *  therefore never take the warm-install fast path. */
+  contentHash?: string;
 }
 
 /* ---------------------------------------------------------- native tests -- */

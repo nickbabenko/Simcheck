@@ -12,6 +12,37 @@ const log = logger('store');
 type Listener = (run: Run) => void;
 
 /**
+ * What a restart does to a run found on disk.
+ *
+ * A `pending` run never held a device, so there is nothing to have been
+ * interrupted: it goes back in the queue in its old place (the queue is
+ * ordered by createdAt). The one exception is a run whose download headers
+ * lived only in memory -- those are gone, and fetching without them would fail
+ * later and more confusingly. A run that had a device (`preparing`/`running`)
+ * was genuinely cut off and is errored, as before.
+ */
+export function recoverRun(run: Run, now: string): 'unchanged' | 'requeued' | 'errored' {
+  if (isTerminal(run.status)) return 'unchanged';
+  if (run.status === 'pending') {
+    if (run.request.app?.urlHeaders) {
+      run.status = 'error';
+      run.error = 'the daemon restarted while this run was queued, and its download headers were held only in memory -- resubmit it';
+      run.finishedAt = now;
+      return 'errored';
+    }
+    run.trace.push({ at: now, kind: 'note', text: 'the daemon restarted; this run is still queued, in its original place' });
+    return 'requeued';
+  }
+  run.status = 'error';
+  run.error = 'daemon restarted while this run was in flight';
+  run.finishedAt = now;
+  // The device went back to the pool on restart (marked dirty); nothing more
+  // to wait for, so the run counts as settled.
+  if (run.startedAt) run.releasedAt = now;
+  return 'errored';
+}
+
+/**
  * Runs live in memory and are written through to
  * `~/.simcheck/runs/<id>/run.json` so they survive a daemon restart and can
  * be inspected by hand. Artifacts sit alongside in the same directory.
@@ -37,12 +68,9 @@ export class Store {
       if (!fs.existsSync(file)) continue;
       try {
         const run = JSON.parse(fs.readFileSync(file, 'utf8')) as Run;
-        // Anything mid-flight when the daemon died is not coming back.
-        if (!isTerminal(run.status)) {
-          run.status = 'error';
-          run.error = 'daemon restarted while this run was in flight';
-          run.finishedAt = nowIso();
-        }
+        const outcome = recoverRun(run, nowIso());
+        if (outcome !== 'unchanged') log.info(`run ${run.id}: ${outcome} after restart`);
+        if (outcome !== 'unchanged') this.persist(run);
         this.runs.set(run.id, run);
       } catch (e) {
         log.warn(`skipping unreadable run ${id}`, (e as Error).message);

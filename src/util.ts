@@ -78,8 +78,21 @@ export const newId = (prefix = 'r'): string =>
 
 export const nowIso = () => new Date().toISOString();
 
+/**
+ * Machine-readable detail on a refusal, sent alongside the human `error`
+ * string so an agent can act on it without pattern-matching prose.
+ */
+export interface ErrorDetail {
+  /** Stable tag, e.g. "max_concurrent_runs", "max_runs_per_hour". */
+  code: string;
+  limit?: number;
+  current?: number;
+  /** Only where it can be computed honestly. */
+  retryAfterSeconds?: number;
+}
+
 export class HttpError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(public status: number, message: string, public detail?: ErrorDetail) { super(message); }
 }
 
 /** Filesystem-safe slug for screenshot names. */

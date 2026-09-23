@@ -34,6 +34,7 @@ export async function prepareApp(
       bundleId: spec.bundleId || fetched.bundleId,
       executable: path.basename(fetched.appPath, '.app'),
       preinstalled: false,
+      contentHash: fetched.id,
     };
   }
 
@@ -47,6 +48,7 @@ export async function prepareApp(
       bundleId: spec.bundleId || artifact.bundleId,
       executable: path.basename(artifact.appPath, '.app'),
       preinstalled: false,
+      contentHash: artifact.id,
     };
   }
 
@@ -64,6 +66,7 @@ export async function prepareApp(
   const appPath = spec.path
     ? await resolveArtifact(cfg, spec.path)
     : await buildFromSource(cfg, spec, udid, runDir, signal);
+  const contentHash = spec.path ? zipDigestFor(cfg, appPath) : undefined;
 
   const info = readInfoPlist(appPath);
   const bundleId = spec.bundleId || info.bundleId;
@@ -77,7 +80,18 @@ export async function prepareApp(
     executable: info.executable || path.basename(appPath, '.app'),
     preinstalled: false,
     ...(spec.path ? {} : { buildLog }),
+    ...(contentHash ? { contentHash } : {}),
   };
+}
+
+/** The digest of the zip an .app was unpacked from, read off the path of its
+ *  content-addressed unpack directory. A bare .app directory has none: hashing
+ *  a bundle tree on every run would cost more than the install it saves. */
+function zipDigestFor(cfg: Config, appPath: string): string | undefined {
+  const rel = path.relative(paths(cfg).builds, appPath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  const digest = rel.split(path.sep)[0];
+  return digest && /^[0-9a-f]{16}$/.test(digest) ? `zip-${digest}` : undefined;
 }
 
 /** Accept a .app directory, or a .zip/.ipa-style archive containing one. */

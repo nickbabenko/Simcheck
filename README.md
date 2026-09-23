@@ -126,8 +126,24 @@ into a `steps` run and the one-off exploration becomes a repeatable check.
 
 Actions: `tap` (by `id`, `label`, `value` or `x`/`y`), `double_tap`, `type`,
 `clear_text`, `press_enter`, `swipe`, `gesture`, **`pinch`**, **`pan`**,
-`button`, `wait`, `wait_for`, `screenshot`, `open_url`, `appearance`,
+`button`, `wait`, `wait_for`, `assert`, `screenshot`, `open_url`, `appearance`,
 `permission`, `launch`, `relaunch`, `terminate`, `describe_ui`.
+
+A steps run passes when no step throws, so a step has to *check* something for
+the run to prove it. `wait_for` throws when its element never appears, which
+makes the run an `error`. **`assert`** (`id` or `label`, optional `timeoutMs`
+and `note`) does the same wait, but a miss is a verdict on the app: the run
+stops and is `failed`, with the assertion in the summary. Put one straight
+after every `open_url` -- a deep link that does not land raises nothing, the
+app just stays where it was -- and the trace flags any `open_url` that nothing
+checks:
+
+```json
+[
+  { "action": "open_url", "url": "myapp://settings" },
+  { "action": "assert", "id": "settings-title", "timeoutMs": 5000 }
+]
+```
 
 ### Multi-touch
 
@@ -303,6 +319,45 @@ use in Xcode are never booted, erased or deleted by this daemon.
 
 Between runs a device is reset by uninstalling the app (fast). Pass
 `"resetPolicy": "erase"` for a full factory reset when a test needs virgin state.
+
+### The warm app: `resetPolicy: "relaunch"`
+
+`"resetPolicy": "relaunch"` leaves the app installed when the run ends, and the
+device remembers which build it holds (its content hash: the artifact id for an
+uploaded or fetched build, the zip digest for a local zip). The next
+`relaunch` run of **the same build, for the same tenant**, skips the uninstall
+and install entirely -- the run's `warm.cacheHit` is `true`, `timings.installMs`
+is just the check that the app is really there, and the report says the run
+started from persisted state. The pool prefers a ready device that already
+holds the build, then one last used by the same tenant, then a clean one; it
+never waits for a busy one to get affinity.
+
+It is opt-in because it changes what a run proves: the app starts with whatever
+it persisted last time -- container, `UserDefaults`, keychain, permission
+grants. If a scenario needs a clean start, have the app reset itself on a
+launch argument, or use `uninstall`/`erase`. Specifically:
+
+- A run that ends `error`, `timeout` or `cancelled` is always reset with
+  `uninstall` instead (`warm.resetPolicyUsed` says so).
+- A source build or a bare `.app` directory has no cheap content hash, so it
+  never takes the fast path.
+- `defaultResetPolicy` stays `uninstall`; set it to `relaunch` only if every
+  caller understands the above.
+
+**Tenants.** iOS keeps permission grants past an uninstall, and keychain items
+and the pasteboard are not app-scoped, so an uninstall is not a boundary
+between customers. The pool records whose build last ran on each device, and a
+run that installs onto a device last used by a different tenant **erases it
+first** (`timings.preResetMs`, billed to that run). The tenant is the
+submitting token; a fleet runner submitting for several customers through one
+token sets `"tenant": "<customer>"` on the request, which is namespaced under
+the token so it can never name another token's tenant. A device that was
+mid-run when the daemon died is marked `dirty` and erased before its next
+install, since nobody knows what is on it.
+
+Not covered: a run that uses an already-installed app (`bundleId` alone)
+installs nothing, so it never triggers the erase -- it would wipe the very app
+it is about to launch.
 
 Recycling also **sanitises the screen**, which matters more than it sounds.
 Uninstalling an app does not dismiss a system alert it left behind — a
@@ -669,6 +724,8 @@ POST   /v1/runs                             submit; 202 with the run id
 GET    /v1/runs?status=&limit=              list
 GET    /v1/runs/:id                         full state
 GET    /v1/runs/:id/wait?timeoutMs=         long-poll until terminal
+       [&settled=true]                        ...and until the device is reset,
+                                              so timings.resetMs/occupancyMs are final
 DELETE /v1/runs/:id                         cancel
 GET    /v1/runs/:id/report                  markdown
 GET    /v1/runs/:id/screenshots             index
@@ -683,6 +740,73 @@ GET    /v1/inspect/:deviceOrUdid            live accessibility tree
 Run statuses: `pending` → `preparing` → `running` → `passed` | `failed` |
 `error` | `timeout` | `cancelled`. `error` means the harness or the build
 broke; it is not a verdict on the app.
+
+A restart keeps the queue: a `pending` run never held a device, so it is
+requeued in its original place. A run that held one (`preparing`/`running`) is
+errored, and its device is marked dirty. (One exception: a queued run whose
+`app.urlHeaders` were held only in memory is errored, since fetching without
+them would fail later and more confusingly -- resubmit it.)
+
+### Timings
+
+Every run carries `timings`, in milliseconds from a monotonic clock, filled in
+as it goes. The names match the Simbase wire contract:
+
+| Field | What it covers |
+|---|---|
+| `queueMs` | submit → device leased, including any cold provision |
+| `prepareMs` | fetch / unpack / build the app |
+| `preResetMs` | erase before install (tenant change, or a dirty device) |
+| `installMs` | uninstall + install, or just the cache check on a warm hit |
+| `launchMs` | first launch and its settle |
+| `stepsMs` | the steps or scenario, mid-run screenshots included |
+| `nativeTestMs` | an XCUITest / instrumentation suite |
+| `screenshotMs` | the final-state capture |
+| `resetMs` | returning the device to the pool, after the run is terminal |
+| `occupancyMs` | device time billed: `(finishedAt − startedAt) + resetMs` |
+| `totalMs` | submit → device released: `queueMs + occupancyMs` |
+
+`resetMs`, `occupancyMs` and `totalMs` land a moment after the run goes
+terminal, when the device is back in the pool; `releasedAt` (and `settled:
+true` on the run view) marks that. A phase cut short by an error, cancel or
+timeout is still timed, and listed in `timingsIncomplete`. Each screenshot's
+trace line carries its own `durationMs`.
+
+### Benchmarking: `simcheck bench`
+
+```bash
+simcheck bench examples/demo-steps.json -n 10              # median / p90 per phase
+simcheck bench flow.json -n 10 --reset relaunch            # the warm path
+simcheck bench flow.json --json > bench.json
+```
+
+Submits the request N times (default 5), one after another, through the normal
+API, waits for each to settle, and prints the phase breakdown plus the share of
+occupancy spent on prepare + install. Runs are labelled `bench ...`. Ten runs
+show the shape of a run, not a capacity number.
+
+### Queue position and 429s
+
+While a run is `pending`, the run view carries `queuePosition` (index in the
+whole queue, 0 = next), `queuePositionForDevice` (only the older runs competing
+for the same devices -- the scheduler leapfrogs runs waiting for devices this
+one cannot use), and `waitingFor`: `device`, or `device_boot` when no matching
+device is booted yet. `etaSeconds` (with `etaSamples`) is given only when the
+devices are warm and there is measured occupancy from recent runs on them; there
+is never an estimate across a cold boot.
+
+A per-token limit answers `429` with structured fields alongside the message:
+
+```json
+{ "error": "token \"a\" already has 2 runs in flight (limit 2). Wait for one to finish.",
+  "code": "max_concurrent_runs", "limit": 2, "current": 2 }
+```
+
+`max_runs_per_hour` also carries `retryAfterSeconds` (and a `Retry-After`
+header), computed from when the oldest submission in the window ages out. The
+in-flight cap has none: nothing says when a run will finish. Over MCP,
+`run_device_test` returns these fields as `{ "rejected": true, ... }` rather
+than failing the tool call.
 
 ## Artifacts
 

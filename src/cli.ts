@@ -5,7 +5,9 @@ import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadConfig, paths, baseUrl } from './config.js';
 import { Client, DaemonDownError, readRequestFile, type RunView } from './client.js';
-import type { RunRequest } from './types.js';
+import type { RunRequest, ResetPolicy } from './types.js';
+import { RESET_POLICIES } from './types.js';
+import { summariseBench, formatBench } from './timings.js';
 import type { PlatformId } from './device.js';
 import { isPlatformId } from './device.js';
 
@@ -22,6 +24,9 @@ const USAGE = `simcheck - hand off iOS simulator and Android emulator testing
 
   simcheck submit <request.json>    queue a run; prints the run id
        [--wait] [--timeout <sec>]      block until it finishes
+  simcheck bench <request.json>     run it N times back to back and print a
+       [-n <count>] [--json]           per-phase timing table (median, p90)
+       [--reset uninstall|erase|relaunch] [--label <text>]
   simcheck get <run-id>             full run state as JSON
   simcheck watch <run-id>           follow a run until it finishes
   simcheck list [-n <count>]        recent runs
@@ -85,6 +90,7 @@ async function main(): Promise<void> {
     case 'status':  return status();
     case 'logs':    return logs();
     case 'submit':  return submit();
+    case 'bench':   return bench();
     case 'get':     return void print(await client.get(need(1, 'run id')));
     case 'watch':   return watch(need(1, 'run id'));
     case 'list':    return list();
@@ -263,8 +269,8 @@ function logs(): void {
   spawn('tail', tailArgs, { stdio: 'inherit' });
 }
 
-async function submit(): Promise<void> {
-  const file = need(1, 'path to a request JSON file');
+/** A request file, with its relative paths resolved against the file. */
+function loadRequest(file: string): RunRequest {
   const request: RunRequest = readRequestFile(file);
 
   // Relative paths in the request file are relative to that file, not to cwd.
@@ -280,6 +286,12 @@ async function submit(): Promise<void> {
   };
   absolutise(request.app as Record<string, unknown> | undefined, ['path', 'project', 'workspace']);
   absolutise(request.xctest as Record<string, unknown> | undefined, ['project', 'workspace', 'xctestrun']);
+  return request;
+}
+
+async function submit(): Promise<void> {
+  const file = need(1, 'path to a request JSON file');
+  const request = loadRequest(file);
 
   const run = await client.submit(request);
   if (!flag('wait')) {
@@ -288,6 +300,60 @@ async function submit(): Promise<void> {
     return;
   }
   await watch(run.id);
+}
+
+/**
+ * Submit one request N times, one after another, through the normal API --
+ * the same path a caller's agent takes -- and summarise the per-phase timings.
+ * Each run is waited on until its device is reset, so reset and occupancy are
+ * included. Runs are labelled so they are recognisable in `simcheck list`.
+ */
+async function bench(): Promise<void> {
+  const file = need(1, 'path to a request JSON file');
+  const n = Math.max(1, Number(opt('count', 'n') ?? 5));
+  const asJson = flag('json');
+  const reset = opt('reset') as ResetPolicy | undefined;
+  if (reset && !RESET_POLICIES.includes(reset)) {
+    console.error(`--reset must be one of: ${RESET_POLICIES.join(', ')}`);
+    process.exit(1);
+  }
+  if (!Number.isFinite(n)) { console.error('-n must be a number'); process.exit(1); }
+  const timeoutSec = Number(opt('timeout') ?? 1800);
+  const label = opt('label') ?? `bench ${path.basename(file, '.json')}`;
+
+  const runs: RunView[] = [];
+  for (let i = 1; i <= n; i++) {
+    const request = loadRequest(file);
+    request.label = `${label} ${i}/${n}`;
+    if (reset) request.resetPolicy = reset;
+    const submitted = await client.submit(request);
+    const run = await client.wait(submitted.id, timeoutSec * 1000, undefined, true);
+    runs.push(run);
+    const occ = run.timings?.occupancyMs;
+    console.error(`  ${String(i).padStart(3)}/${n}  ${run.status.padEnd(9)} ${occ !== undefined ? `${(occ / 1000).toFixed(1)}s` : '-'}` +
+      `${run.warm?.cacheHit ? '  (warm)' : ''}  ${run.id}`);
+    if (!run.done) {
+      console.error(`run ${run.id} did not finish within ${timeoutSec}s; stopping`);
+      break;
+    }
+  }
+
+  const summary = summariseBench(runs);
+  const device = runs.find((r) => r.device)?.device;
+  if (asJson) {
+    return void print({
+      request: path.basename(file), label, resetPolicy: reset ?? null,
+      device: device ? { name: device.name, runtime: device.runtime, platform: device.platform } : null,
+      ...summary,
+      runs: runs.map((r) => ({ id: r.id, status: r.status, timings: r.timings ?? null, cacheHit: r.warm?.cacheHit ?? false })),
+    });
+  }
+  console.log('');
+  console.log(`${path.basename(file)}, ${runs.length} run(s)${reset ? `, reset ${reset}` : ''}` +
+    `${device ? `, ${device.name} / ${device.runtime}` : ''}`);
+  console.log('');
+  console.log(formatBench(summary));
+  if (runs.some((r) => r.status !== 'passed')) process.exitCode = 1;
 }
 
 async function watch(id: string): Promise<void> {

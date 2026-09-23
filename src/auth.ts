@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Config } from './config.js';
 import { paths } from './config.js';
-import { nowIso } from './util.js';
+import { nowIso, type ErrorDetail } from './util.js';
 import { logger } from './log.js';
 
 const log = logger('auth');
@@ -74,7 +74,10 @@ export interface Identity {
 export class AuthError extends Error {
   /** Set when the token was valid but lacked a capability, so the audit log
    *  can name who was refused rather than recording "unknown". */
-  constructor(public status: number, message: string, public identity?: Identity) { super(message); }
+  constructor(
+    public status: number, message: string, public identity?: Identity,
+    public detail?: ErrorDetail,
+  ) { super(message); }
 }
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
@@ -266,8 +269,11 @@ export class TokenStore {
     const cutoff = Date.now() - 3_600_000;
     const window = (this.submissions.get(identity.id) ?? []).filter((t) => t > cutoff);
     if (window.length >= identity.maxRunsPerHour) {
+      // The oldest submission in the window is the next to age out.
+      const retryAfterSeconds = Math.max(1, Math.ceil((Math.min(...window) + 3_600_000 - Date.now()) / 1000));
       throw new AuthError(429,
-        `token "${identity.name}" is limited to ${identity.maxRunsPerHour} runs per hour`, identity);
+        `token "${identity.name}" is limited to ${identity.maxRunsPerHour} runs per hour`, identity,
+        { code: 'max_runs_per_hour', limit: identity.maxRunsPerHour, current: window.length, retryAfterSeconds });
     }
     window.push(Date.now());
     this.submissions.set(identity.id, window);

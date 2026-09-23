@@ -117,6 +117,10 @@ export type Step =
   | { action: 'button'; button: HardwareButton; durationMs?: number }
   | { action: 'wait'; ms: number; note?: string }
   | { action: 'wait_for'; id?: string; label?: string; timeoutMs?: number }
+  /** Like wait_for, but a miss is a verdict on the app (the run fails) rather
+   *  than a harness error. Put one straight after an `open_url` so a deep link
+   *  that did not land fails the run instead of passing it silently. */
+  | { action: 'assert'; id?: string; label?: string; timeoutMs?: number; note?: string }
   | { action: 'screenshot'; name: string; note?: string }
   | { action: 'open_url'; url: string }
   | { action: 'appearance'; mode: 'light' | 'dark' }
@@ -201,13 +205,65 @@ export interface RunRequest {
   device?: DeviceRequest;
   timeoutMs?: number;
   /** How to return the device to the pool. `uninstall` is fast (default);
-   *  `erase` is a full factory reset and costs ~30s. */
-  resetPolicy?: 'uninstall' | 'erase';
+   *  `erase` is a full factory reset and costs ~30s. `relaunch` keeps the app
+   *  installed so the next `relaunch` run of the same build, for the same
+   *  tenant, skips the install entirely -- opt-in, because such a run starts
+   *  from whatever state the app persisted (container, defaults, keychain,
+   *  permission grants), not from a fresh install. A run that ends in
+   *  error/timeout/cancelled is always downgraded to `uninstall`. */
+  resetPolicy?: ResetPolicy;
+  /** Who this run is for, when one token submits on behalf of several
+   *  customers (a fleet runner). Namespaced under the submitting token, so it
+   *  can never name another token's tenant. A device that last ran another
+   *  tenant's build is erased before this run installs anything: iOS keeps
+   *  permission grants, keychain items and the pasteboard past an uninstall. */
+  tenant?: string;
   /** Safety valve on the NL agent loop. */
   maxActions?: number;
   label?: string;
   metadata?: Record<string, unknown>;
 }
+
+export type ResetPolicy = 'uninstall' | 'erase' | 'relaunch';
+export const RESET_POLICIES: readonly ResetPolicy[] = ['uninstall', 'erase', 'relaunch'];
+
+/**
+ * Per-phase wall time for one run, in milliseconds, measured with a monotonic
+ * clock. Field names match the Simbase wire contract (`Timings`). A phase that
+ * is absent was never reached. Phases do not overlap, so everything from
+ * prepare to reset sums to (roughly) `occupancyMs`.
+ */
+export interface RunTimings {
+  /** Submit -> device leased (startedAt - createdAt). Includes any cold
+   *  provision the scheduler had to do first. */
+  queueMs?: number;
+  /** Fetch / unpack / build the app. Near zero for an uploaded artifact. */
+  prepareMs?: number;
+  /** Erase before install, because the device last held another tenant's
+   *  build or came back from a crash with unknown contents. Billed to the run
+   *  that caused it. Not part of the Simbase contract; additive. */
+  preResetMs?: number;
+  /** Uninstall + install, or the cache check alone on a warm hit. */
+  installMs?: number;
+  /** First launch plus its settle time. */
+  launchMs?: number;
+  /** The steps / scenario (mid-run screenshots included). */
+  stepsMs?: number;
+  /** A native test suite (xctest / instrumentation). Additive. */
+  nativeTestMs?: number;
+  /** The final-state capture. */
+  screenshotMs?: number;
+  /** Returning the device to the pool, after finishedAt. */
+  resetMs?: number;
+  /** Device time this run cost: (finishedAt - startedAt) + reset. The number
+   *  a device-minute bills. */
+  occupancyMs?: number;
+  /** Submit -> device released: queue + occupancy. */
+  totalMs?: number;
+}
+
+export type PhaseKey = 'prepareMs' | 'preResetMs' | 'installMs' | 'launchMs' | 'stepsMs'
+  | 'nativeTestMs' | 'screenshotMs' | 'resetMs';
 
 export interface TraceEntry {
   at: string;
@@ -262,7 +318,36 @@ export interface Run {
   };
   /** Relative paths inside the run directory. */
   artifacts: { report?: string; appLog?: string; buildLog?: string; testLog?: string };
+  /** Per-phase timings, filled in as the run progresses. `resetMs`,
+   *  `occupancyMs` and `totalMs` land after the run is terminal, once the
+   *  device has been reset -- wait for `releasedAt` (or use
+   *  `/wait?settled=true`) before reading them. */
+  timings?: RunTimings;
+  /** Phases that were cut short by an error, cancel or timeout: their
+   *  timing is real but a lower bound. */
+  timingsIncomplete?: PhaseKey[];
+  /** When the device was handed back to the pool. Absent until then, and on
+   *  a run that never held a device. */
+  releasedAt?: string;
+  /** What the warm-app cache did for this run. */
+  warm?: {
+    /** True when the install was skipped because the device already held
+     *  this exact build for this tenant. */
+    cacheHit: boolean;
+    /** Why it did or did not hit, in words. */
+    reason: string;
+    /** The device was erased first (tenant change, or unknown contents). */
+    erased?: boolean;
+    resetPolicyRequested?: ResetPolicy;
+    /** Differs from requested when a dirty run was downgraded. */
+    resetPolicyUsed?: ResetPolicy;
+  };
 }
+
+/** Terminal, and the device (if any) is back in the pool -- so the timings
+ *  are final. */
+export const isSettled = (run: Pick<Run, 'status' | 'startedAt' | 'releasedAt'>): boolean =>
+  isTerminal(run.status) && (!run.startedAt || Boolean(run.releasedAt));
 
 export interface PooledDevice {
   /** Stable identity: a simulator UDID on iOS, an AVD name on Android. */
@@ -278,4 +363,21 @@ export interface PooledDevice {
   lastError?: string;
   /** true if the harness created it (and may therefore delete it). */
   managed: boolean;
+  /** The build the harness left installed on this device (resetPolicy
+   *  `relaunch`), so an identical run can skip the install. Only ever a
+   *  cache: the device is checked before it is trusted. */
+  installed?: {
+    bundleId: string;
+    /** Content hash of the build: the artifact id for uploaded/fetched
+     *  builds, the zip digest for a local zip. */
+    appHash: string;
+    tenant?: string;
+    installedAt: string;
+  };
+  /** Whose build last ran on this device since it was last erased. A run for
+   *  a different tenant erases the device before installing. */
+  tenant?: string;
+  /** The device came back from a daemon crash mid-run: what is on it is
+   *  unknown, so the next run that installs anything erases it first. */
+  dirty?: boolean;
 }

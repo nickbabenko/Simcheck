@@ -20,6 +20,8 @@ const VERDICT_BADGE: Record<string, string> = {
  * inline, full trace underneath. Screenshot links are relative so the file
  * renders correctly straight out of the run directory.
  */
+const reusedBuild = (run: Run): boolean => Boolean(run.warm?.cacheHit);
+
 export function writeReport(run: Run, runDir: string): string {
   const L: string[] = [];
   const dur = run.startedAt && run.finishedAt
@@ -40,7 +42,31 @@ export function writeReport(run: Run, runDir: string): string {
   if (run.bundleId) L.push(`| ${run.device?.platform === 'android' ? 'Package' : 'Bundle'} | \`${run.bundleId}\` |`);
   L.push(`| Duration | ${dur} |`);
   if (run.actionsUsed !== undefined) L.push(`| Actions | ${run.actionsUsed} |`);
+  if (run.warm) {
+    L.push(`| Install | ${run.warm.cacheHit ? 'skipped (warm cache hit)' : 'fresh'}${run.warm.erased ? ', device erased first' : ''} |`);
+    const used = run.warm.resetPolicyUsed ?? run.warm.resetPolicyRequested;
+    if (used) L.push(`| Reset | ${used}${run.warm.resetPolicyUsed && run.warm.resetPolicyUsed !== run.warm.resetPolicyRequested ? ` (requested ${run.warm.resetPolicyRequested})` : ''} |`);
+  }
   L.push('');
+  if (reusedBuild(run)) {
+    // A relaunch run starts from whatever the app persisted, not a clean
+    // install; a reader of the evidence needs to know that.
+    L.push('> This run reused an installed build (`resetPolicy: relaunch`): it started from the app\'s persisted state, not a fresh install.', '');
+  }
+  const t = run.timings;
+  if (t && Object.keys(t).length) {
+    const ms = (v?: number) => (v === undefined ? '-' : v >= 10_000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`);
+    const rows: [string, number | undefined][] = [
+      ['queue', t.queueMs], ['prepare', t.prepareMs], ['pre-reset (erase)', t.preResetMs],
+      ['install', t.installMs], ['launch', t.launchMs], ['steps', t.stepsMs],
+      ['native tests', t.nativeTestMs], ['final screenshot', t.screenshotMs], ['reset', t.resetMs],
+      ['occupancy (device time)', t.occupancyMs], ['total', t.totalMs],
+    ];
+    L.push('## Timings', '', '| Phase | Time |', '|---|---|');
+    for (const [name, v] of rows) if (v !== undefined) L.push(`| ${name} | ${ms(v)} |`);
+    if (run.timingsIncomplete?.length) L.push('', `Cut short: ${run.timingsIncomplete.join(', ')} (lower bounds).`);
+    L.push('');
+  }
 
   if (run.request.scenario) L.push('## Scenario', '', run.request.scenario, '');
   if (run.request.assert) L.push('## Assertion', '', run.request.assert, '');

@@ -63,7 +63,8 @@ export interface Config {
   devicePrefix: string;
   defaultTimeoutMs: number;
   defaultMaxActions: number;
-  defaultResetPolicy: 'uninstall' | 'erase';
+  /** 'relaunch' is opt-in: see RunRequest.resetPolicy. */
+  defaultResetPolicy: 'uninstall' | 'erase' | 'relaunch';
   /** 'auto' picks the Anthropic API when a key is present, else the claude CLI. */
   llmBackend: 'auto' | 'anthropic' | 'claude-cli' | 'none';
   model: string;
