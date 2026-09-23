@@ -8,6 +8,7 @@ import { isToolsError, resolveTools } from './android/sdk.js';
 import { listSystemImages, preferredAbi } from './android/avd.js';
 import { resolveDriverApks } from './android/touch.js';
 import { installHints } from './android/hints.js';
+import { resolveProbe } from './ios/probe.js';
 
 export interface Check {
   name: string;
@@ -142,6 +143,8 @@ function iosChecks(cfg: Config): Check[] {
     ? { name: 'AXe', state: 'ok', detail: axe }
     : { name: 'AXe', state: 'fail', detail: 'not on PATH', fix: 'brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe' });
 
+  checks.push(probeCheck(cfg));
+
   const baguette = run(cfg.baguetteBin, ['--version']).trim();
   checks.push(baguette
     ? { name: 'iOS multi-touch', state: 'ok', detail: `baguette ${baguette}` }
@@ -152,6 +155,29 @@ function iosChecks(cfg: Config): Check[] {
       });
 
   return checks;
+}
+
+/** The in-app probe: optional, so only a configured-but-broken one fails. */
+function probeCheck(cfg: Config): Check {
+  if (cfg.probe === 'off') return { name: 'Probe', state: 'ok', detail: 'switched off (probe: "off"); probe runs use fixed waits' };
+  if (!cfg.probeDylib) {
+    return {
+      name: 'Probe', state: 'ok',
+      detail: 'not configured; probe: true runs use fixed waits',
+      fix: 'build it (@simbase/probe: native/build.sh) and set "probeDylib" to the SimbaseProbe.dylib path',
+    };
+  }
+
+  const availability = resolveProbe(cfg);
+  if ('unavailable' in availability) {
+    return { name: 'Probe', state: 'fail', detail: availability.unavailable, fix: 'rebuild with native/build.sh, or fix "probeDylib"' };
+  }
+
+  const archs = run('lipo', ['-archs', availability.dylibPath]).trim().split(/\s+/);
+  const missing = ['arm64', 'x86_64'].filter((arch) => !archs.includes(arch));
+  return missing.length
+    ? { name: 'Probe', state: 'warn', detail: `${availability.dylibPath} lacks ${missing.join(', ')}`, fix: 'rebuild with native/build.sh (universal)' }
+    : { name: 'Probe', state: 'ok', detail: `${availability.dylibPath} (arm64 + x86_64${fs.existsSync(`${availability.dylibPath}.sha256`) ? ', sha256 verified' : ''})` };
 }
 
 /**

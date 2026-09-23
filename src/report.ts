@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Run } from './types.js';
+import type { Run, StepSettle } from './types.js';
 import { describeStep } from './steps.js';
 
 const MODE_LABEL: Record<string, string> = {
@@ -65,6 +65,9 @@ export function writeReport(run: Run, runDir: string): string {
     L.push('## Timings', '', '| Phase | Time |', '|---|---|');
     for (const [name, v] of rows) if (v !== undefined) L.push(`| ${name} | ${ms(v)} |`);
     if (run.timingsIncomplete?.length) L.push('', `Cut short: ${run.timingsIncomplete.join(', ')} (lower bounds).`);
+    if (t.settleSavedMs !== undefined) {
+      L.push('', `Probe settling ${t.settleSavedMs >= 0 ? 'saved' : 'cost'} ${ms(Math.abs(t.settleSavedMs))} against fixed sleeps.`);
+    }
     L.push('');
   }
 
@@ -123,11 +126,25 @@ export function writeReport(run: Run, runDir: string): string {
     const time = t.at.slice(11, 19);
     const prefix = { thought: '~', step: '.', error: '!', screenshot: '*', note: '#' }[t.kind] ?? '.';
     const ms = t.durationMs ? ` (${t.durationMs}ms)` : '';
-    L.push(`\`${time}\` ${prefix} ${t.text.replace(/\n/g, '\n      ')}${ms}`);
+    L.push(`\`${time}\` ${prefix} ${t.text.replace(/\n/g, '\n      ')}${ms}${t.settle ? ` [${describeSettle(t.settle)}]` : ''}`);
   }
   L.push('');
 
   const out = path.join(runDir, 'report.md');
   fs.writeFileSync(out, L.join('\n'));
   return 'report.md';
+}
+
+/** One line on how a step waited: "settled by probe in 412ms (sleep was
+ *  600ms)", or "timed out after 10000ms: spinner". Network and console
+ *  evidence never appear in the report: they are private by default. */
+function describeSettle(settle: StepSettle): string {
+  if (settle.via === 'sleep') {
+    return `fixed wait ${settle.waitedMs}ms${settle.probeError ? `; probe error: ${settle.probeError}` : ''}`;
+  }
+  const outcome = settle.settled
+    ? `settled by probe in ${settle.waitedMs}ms`
+    : `timed out after ${settle.waitedMs}ms: ${settle.busy?.join(', ') || 'still redrawing'}`;
+  const was = settle.fallbackMs ? ` (sleep was ${settle.fallbackMs}ms)` : '';
+  return `${outcome}${was}${settle.systemUi ? `; system UI: ${settle.systemUi}` : ''}`;
 }

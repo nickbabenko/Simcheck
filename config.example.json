@@ -31,6 +31,10 @@
     { "platform": "android", "deviceType": "pixel_7", "runtime": "35", "count": 1 }
   ],
 
+  "//_probe": "The in-app probe for probe: true runs (iOS simulator): settle instead of fixed sleeps, network.json and console.log evidence. probeDylib is the built SimbaseProbe.dylib (the @simbase/probe package's native/build.sh); a .sha256 beside it must match. probe: 'off' is the kill switch (SIMCHECK_PROBE=off).",
+  "probe": "on",
+  "probeDylib": "",
+
   "host": "127.0.0.1",
   "port": 8829,
 

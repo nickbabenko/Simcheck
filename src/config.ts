@@ -112,6 +112,14 @@ export interface Config {
    */
   androidEmulatorArgs: string[];
   /**
+   * The in-app probe for `probe: true` runs (iOS simulator). `probeDylib` is
+   * the built SimbaseProbe.dylib, by absolute path (the @simbase/probe
+   * package's native/build.sh output); a `.sha256` beside it must match.
+   * `probe: "off"` is the kill switch: such runs go ahead without it.
+   */
+  probe: 'on' | 'off';
+  probeDylib: string;
+  /**
    * Who is allowed to reach the daemon at all, before token checks:
    *  - 'none'              loopback only (default, and correct on a dev machine)
    *  - 'cloudflare-access' verify the Cf-Access-Jwt-Assertion JWT in-process
@@ -223,6 +231,8 @@ const DEFAULTS: Config = {
   androidBootTimeoutMs: 300_000,
   androidGuestFirewall: 'required',
   androidEmulatorArgs: [],
+  probe: 'on',
+  probeDylib: '',
   edgeAuth: 'none',
   edgeAllowLoopback: true,
   cloudflareTeamDomain: '',

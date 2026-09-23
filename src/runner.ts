@@ -17,6 +17,8 @@ import { writeReport } from './report.js';
 import { transcode, RAW_VIDEO } from './video.js';
 import { logger } from './log.js';
 import { nowIso, sleep } from './util.js';
+import { ProbeSession } from './ios/probe-session.js';
+import { findFreePort, generateProbeToken, resolveProbe, type ProbeAvailability } from './ios/probe.js';
 
 const log = logger('runner');
 
@@ -35,6 +37,8 @@ const safeHost = (url: string): string => {
  */
 export class Runner {
   private aborts = new Map<string, AbortController>();
+  /** Resolved on first use: whether a probe run can have its dylib. */
+  private probeAvailability: ProbeAvailability | null = null;
 
   constructor(
     private cfg: Config,
@@ -82,6 +86,7 @@ export class Runner {
     let logStream: { kill(): void } | null = null;
     let recording: ScreenRecording | null = null;
     let rawVideo: string[] = [];
+    let executor: StepExecutor | null = null;
     const tenant = tenantOf(run);
     const requestedPolicy: ResetPolicy = run.request.resetPolicy ?? this.cfg.defaultResetPolicy;
 
@@ -214,7 +219,10 @@ export class Runner {
       // shows the app coming up.
       if (run.request.record) recording = await this.startRecording(run.id, platform.devices, device.udid, runDir);
 
-      const executor = new StepExecutor(ui, platform.devices, this.store, {
+      const probe = run.request.probe && device.platform === 'ios' && !isNativeTestMode(run.mode)
+        ? await this.probeFor(run.id, runDir)
+        : undefined;
+      const stepper = new StepExecutor(ui, platform.devices, this.store, {
         runId: run.id,
         udid: device.udid,
         app: launchTarget ?? { appId: bundleId ?? '', executable: bundleId ?? '' },
@@ -222,14 +230,21 @@ export class Runner {
         launchArgs: appSpec.launchArgs ?? [],
         launchEnv: appSpec.launchEnv ?? {},
         signal,
+        ...(probe !== undefined ? { probe } : {}),
+        ...(run.request.settleTimeoutMs ? { settleTimeoutMs: run.request.settleTimeoutMs } : {}),
       }, touch);
+      executor = stepper;
 
       this.store.update(run.id, { status: 'running' });
       if (!isNativeTestMode(run.mode)) {
         // The platform's test runner installs and launches the app itself.
         await phase(this.store, run.id, 'launchMs', async () => {
-          await executor.run({ action: 'launch' });
-          await sleep(1200, signal);
+          await stepper.run({ action: 'launch' });
+          // The launch step has already waited for the app. This second
+          // sleep predates the probe; with it attached, the app has said it
+          // settled, so the extra wait is pure cost.
+          if (stepper.probeAttached) stepper.settleSavedMs += 1200;
+          else await sleep(1200, signal);
         });
       }
 
@@ -271,7 +286,7 @@ export class Runner {
         if (!this.llm) throw new Error('no LLM backend configured, so natural-language scenarios cannot run -- submit explicit `steps`, or set ANTHROPIC_API_KEY and restart the daemon');
         const llm = this.llm;
         const result = await phase(this.store, run.id, 'stepsMs', () => runScenario({
-          llm, run, store: this.store, exec: executor, runDir,
+          llm, run, store: this.store, exec: stepper, runDir,
           maxActions: run.request.maxActions ?? this.cfg.defaultMaxActions,
           signal,
         }));
@@ -290,7 +305,7 @@ export class Runner {
           for (const step of steps) {
             if (signal.aborted) break;
             try {
-              await executor.run(step);
+              await stepper.run(step);
               done++;
             } catch (e) {
               // A missed `assert` is a verdict on the app, not a harness
@@ -312,9 +327,14 @@ export class Runner {
       // after a native test run, which tears its own app down.
       if (!isNativeTestMode(run.mode)) {
         await phase(this.store, run.id, 'screenshotMs',
-          () => executor.capture('final-state', 'Screen at the end of the run')).catch((e) =>
+          () => stepper.capture('final-state', 'Screen at the end of the run')).catch((e) =>
           log.warn('final screenshot failed', (e as Error).message));
       }
+
+      // Before the status goes terminal, so a reader woken by it finds the
+      // evidence on the run. The finally block repeats this for a run that
+      // errored; closing twice is harmless.
+      await this.finishProbe(run.id, stepper);
 
       const current = this.store.get(run.id)!;
       const missing = (run.request.screenshots ?? []).filter(
@@ -360,6 +380,8 @@ export class Runner {
       this.aborts.delete(run.id);
       this.store.forgetSecret(run.id);
       logStream?.kill();
+      // The last probe evidence, and the token dropped with the session.
+      if (executor) await this.finishProbe(run.id, executor);
       // Before the reset, so the film ends on the run's last frame rather than
       // on the app being uninstalled.
       if (recording) rawVideo = await this.stopRecording(run.id, recording);
@@ -422,6 +444,44 @@ export class Runner {
         // Last, because it is what a settled waiter wakes on.
         this.store.update(run.id, { releasedAt: nowIso() });
       }
+    }
+  }
+
+  /**
+   * The probe session for a `probe: true` run, or null (with a trace note)
+   * when the daemon cannot provide one. Never throws: the probe never fails
+   * a run.
+   */
+  private async probeFor(runId: string, runDir: string): Promise<ProbeSession | null> {
+    this.probeAvailability ??= resolveProbe(this.cfg);
+    const availability = this.probeAvailability;
+    if ('unavailable' in availability) {
+      this.store.trace(runId, { kind: 'note', text: `probe unavailable: ${availability.unavailable}; using fixed waits` });
+      return null;
+    }
+
+    try {
+      const port = await findFreePort();
+      return new ProbeSession(availability.dylibPath, port, generateProbeToken(), runDir);
+    } catch (e) {
+      this.store.trace(runId, { kind: 'note', text: `probe unavailable: ${(e as Error).message}; using fixed waits` });
+      return null;
+    }
+  }
+
+  /** Close the probe session: evidence onto the run, settleSavedMs into its
+   *  timings. Never throws. */
+  private async finishProbe(runId: string, executor: StepExecutor): Promise<void> {
+    try {
+      const evidence = await executor.closeProbe();
+      const current = this.store.get(runId);
+      if (!current) return;
+      if (evidence.networkLog || evidence.consoleLog) {
+        this.store.update(runId, { artifacts: { ...current.artifacts, ...evidence } });
+      }
+      if (current.request.probe) mergeTimings(this.store, runId, { settleSavedMs: Math.round(executor.settleSavedMs) });
+    } catch (e) {
+      log.warn('could not close the probe session', (e as Error).message);
     }
   }
 

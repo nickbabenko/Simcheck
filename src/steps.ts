@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Step } from './types.js';
+import type { Step, StepSettle } from './types.js';
 import type { Store } from './store.js';
 import type { DeviceBackend, LaunchTarget, TouchDriver, UiDriver } from './device.js';
 import { renderScreen, type Screen } from './screen.js';
 import { sleep, slug, nowIso } from './util.js';
 import { logger } from './log.js';
-import { acceptOpenIn } from './ios/consent.js';
+import { acceptOpenIn, findOpenInSheet } from './ios/consent.js';
+import type { ProbeSession } from './ios/probe-session.js';
+import { globMatches, type ProbeNetworkRequest } from './ios/probe.js';
 import { assertSafeLaunchArgs, assertSafeLaunchEnv } from './launchguard.js';
 
 const log = logger('steps');
@@ -20,7 +22,24 @@ export interface ExecutorContext {
   launchArgs: string[];
   launchEnv: Record<string, string>;
   signal: AbortSignal;
+  /** The in-app probe, when the run asked for one (iOS). Null when it was
+   *  asked for but is unavailable, so the trace still records how each step
+   *  waited. Absent when the run never asked. */
+  probe?: ProbeSession | null;
+  /** How long one settle may wait. Default 10s. */
+  settleTimeoutMs?: number;
 }
+
+/** docs/23 §3.1: bounded, and never worse than a fixed sleep. */
+export const DEFAULT_SETTLE_TIMEOUT_MS = 10_000;
+
+/** Steps that can raise system UI the probe cannot see: after these, one AXe
+ *  read looks for a SpringBoard sheet. The others almost never raise one, and
+ *  skipping the 200-350ms read there keeps most of the win. */
+const SYSTEM_UI_CHECK = new Set(['launch', 'relaunch', 'open_url', 'button', 'tap', 'permission']);
+
+/** Steps that only mean anything with the probe attached. */
+export const PROBE_STEPS: readonly string[] = ['wait_idle', 'assert_request'];
 
 /** Told to the caller when a multi-touch step has no driver behind it. */
 export const noTouchDriver = (platform: string): string =>
@@ -44,6 +63,15 @@ export class StepExecutor {
   /** How long `open_url` watches for iOS's "Open in …?" consent sheet. It is
    *  also the settle time when none appears. Tests shorten it. */
   consentWindowMs = 2000;
+  /** Sum over probe-settled steps of (fixed wait - actual wait). */
+  settleSavedMs = 0;
+  /** How the step in flight settled, attached to its trace line. */
+  private pendingSettle: StepSettle | undefined;
+  /** When each executed step started (wall ms), to tag network requests. */
+  private stepStarts: number[] = [];
+  /** The app's pid from the last launch, for crash attribution. */
+  private appPid = 0;
+  private crashNoted = false;
 
   constructor(
     private ui: UiDriver,
@@ -77,13 +105,146 @@ export class StepExecutor {
 
   async run(step: Step): Promise<void> {
     const started = Date.now();
+    this.stepStarts.push(started);
+    this.pendingSettle = undefined;
     try {
       const detail = await this.dispatch(step);
       this.record(step, true, Date.now() - started, undefined, detail ?? undefined);
     } catch (e) {
       this.record(step, false, Date.now() - started, (e as Error).message);
       throw e;
+    } finally {
+      await this.afterStep();
     }
+  }
+
+  /** The probe attached and answering, or null. */
+  private get probe(): ProbeSession | null {
+    return this.ctx.probe?.attached ? this.ctx.probe : null;
+  }
+
+  /** Index of the step that was running at `at` (wall ms), or null. */
+  private stepAt = (at: number): number | null => {
+    let index: number | null = null;
+    this.stepStarts.forEach((startedAt, i) => { if (startedAt <= at) index = i; });
+    return index;
+  };
+
+  /**
+   * Between steps, with a probe: pull its evidence, and notice an app that
+   * died with the probe inside it. A crash with the probe injected is the
+   * customer's crash (docs/23 §6), but the reader deserves the hint.
+   */
+  private async afterStep(): Promise<void> {
+    const probe = this.probe;
+    if (!probe) return;
+
+    await probe.pullEvidence(this.stepAt);
+
+    if (this.appPid && !this.crashNoted && !isAlive(this.appPid)) {
+      this.crashNoted = true;
+      probe.detach(`the app (pid ${this.appPid}) is no longer running`);
+      this.store.trace(this.ctx.runId, {
+        kind: 'note',
+        text: `the app process (pid ${this.appPid}) exited while the probe was attached. A crash with the probe ` +
+          'injected counts as the app\'s own; re-run with probe: false to rule the probe out.',
+      });
+    }
+  }
+
+  /** Last evidence pull, and forget the token. Never throws. */
+  async closeProbe(): Promise<{ networkLog?: string; consoleLog?: string }> {
+    const probe = this.ctx.probe;
+    if (!probe) return {};
+    await probe.close(this.stepAt).catch(() => undefined);
+    return probe.evidence();
+  }
+
+  /** The probe was asked for but cannot be used: say so once, and wait the
+   *  way the harness always has. */
+  private probeUnavailable(reason: string): void {
+    this.store.trace(this.ctx.runId, { kind: 'note', text: `probe unavailable: ${reason}; using fixed waits` });
+  }
+
+  /**
+   * Wait for the app after an action (docs/23 §3.1). With the probe, until
+   * the app says it has settled, bounded by the settle timeout; a timeout is
+   * not a failure, the step goes on and the trace says what was busy.
+   * Without it, or if it errors, the same fixed sleep as always.
+   */
+  private async settleAfter(action: string, fallbackMs: number): Promise<StepSettle> {
+    const probe = this.probe;
+    if (!probe) {
+      await sleep(fallbackMs, this.ctx.signal);
+      return this.noteSettle({ via: 'sleep', waitedMs: fallbackMs, fallbackMs });
+    }
+
+    try {
+      const result = await probe.client.waitSettled(this.ctx.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS, 200);
+      probe.succeeded();
+      const settle: StepSettle = {
+        via: 'probe', waitedMs: Math.round(result.elapsedMs), fallbackMs,
+        settled: result.settled, settledAtMs: result.settledAtMs,
+        ...(result.busy.length ? { busy: result.busy } : {}),
+      };
+      if (SYSTEM_UI_CHECK.has(action)) {
+        const systemUi = await this.systemSheet(action);
+        if (systemUi) settle.systemUi = systemUi;
+      }
+      this.settleSavedMs += fallbackMs - settle.waitedMs;
+      return this.noteSettle(settle);
+    } catch (e) {
+      const probeError = (e as Error).message;
+      probe.failed(probeError);
+      if (probe.detached) this.probeUnavailable(probe.detached);
+      await sleep(fallbackMs, this.ctx.signal);
+      return this.noteSettle({ via: 'sleep', waitedMs: fallbackMs, fallbackMs, probeError });
+    }
+  }
+
+  /** Remember a settle for the step's trace line; only on probe runs, so a
+   *  run that never asked for one reads exactly as before. */
+  private noteSettle(settle: StepSettle): StepSettle {
+    if (this.ctx.probe !== undefined) this.pendingSettle = settle;
+    return settle;
+  }
+
+  /**
+   * The probe sees only the app. With a SpringBoard sheet up it reports the
+   * app idle (docs/23 §4), so after the steps that can raise one, AXe looks.
+   * The "Open in …?" consent sheet is answered, as open_url always has; any
+   * other alert or sheet is noted, and answering it is the caller's job.
+   */
+  private async systemSheet(action: string): Promise<string | null> {
+    const screen = await this.ui.describe(this.ctx.signal).catch(() => null);
+    if (!screen) return null;
+    this.lastScreen = screen;
+
+    const sheet = findOpenInSheet(screen);
+    if (sheet) {
+      await this.ui.tap({ x: sheet.open.center.x, y: sheet.open.center.y }, this.ctx.signal);
+      this.store.trace(this.ctx.runId, { kind: 'note', text: `iOS asked ${JSON.stringify(sheet.title)} after ${action}; tapped Open` });
+      await this.settleQuietly();
+      return sheet.title;
+    }
+
+    const alert = screen.elements.find((element) => element.type === 'Alert' || element.type === 'Sheet');
+    if (!alert) return null;
+
+    const title = alert.label ?? alert.type;
+    this.store.trace(this.ctx.runId, {
+      kind: 'note',
+      text: `an alert or sheet is on screen after ${action}: ${JSON.stringify(title)} -- the probe cannot see system UI, so answer it with a tap step if it is not the app's own`,
+    });
+    return title;
+  }
+
+  /** A settle whose result nobody records: after answering a sheet. */
+  private async settleQuietly(): Promise<void> {
+    const probe = this.probe;
+    if (!probe) return void await sleep(1200, this.ctx.signal);
+    await probe.client.waitSettled(this.ctx.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS, 200)
+      .catch(() => sleep(1200, this.ctx.signal));
   }
 
   /** Best-effort variant for the agent loop: a failed tap is feedback, not a crash. */
@@ -105,8 +266,24 @@ export class StepExecutor {
     assertSafeLaunchEnv(env, 'launch env', this.devices.platform);
     assertSafeLaunchArgs(args, 'launch args');
 
-    return this.devices.launch(this.ctx.udid, this.ctx.app, args, env);
+    // The probe's own variables go in after the check: they are exactly the
+    // keys a caller may not set.
+    const probe = this.ctx.probe;
+    const withProbe = probe && !probe.detached ? { ...env, ...probe.launchEnv() } : env;
+    const pid = await this.devices.launch(this.ctx.udid, this.ctx.app, args, withProbe);
+    this.appPid = pid;
+    this.crashNoted = false;
+
+    if (probe && !probe.detached) {
+      const failure = await probe.afterLaunch(this.ctx.app.appId, pid);
+      if (failure) this.probeUnavailable(failure);
+    }
+    return pid;
   }
+
+  /** Whether the probe is attached right now; the runner uses it to skip a
+   *  fixed sleep the probe has made redundant. */
+  get probeAttached(): boolean { return Boolean(this.probe); }
 
   /** Returns a description of what was actually driven, where that differs
    *  from what was asked for. Anything else traces as the step itself. */
@@ -115,28 +292,31 @@ export class StepExecutor {
     switch (step.action) {
       case 'launch':
         await this.launchApp(step.args ?? this.ctx.launchArgs, step.env ?? this.ctx.launchEnv);
-        await sleep(1200, signal);
+        await this.settleAfter('launch', 1200);
         return;
 
       case 'relaunch':
         await this.devices.terminate(udid, app.appId);
-        await sleep(400, signal);
+        this.ctx.probe?.appStopped();
+        await sleep(400, signal);            // terminate hygiene, not a settle
         await this.launchApp(this.ctx.launchArgs, this.ctx.launchEnv);
-        await sleep(1200, signal);
+        await this.settleAfter('relaunch', 1200);
         return;
 
       case 'terminate':
         await this.devices.terminate(udid, app.appId);
+        this.ctx.probe?.appStopped();
+        this.appPid = 0;
         return;
 
       case 'tap':
         await this.ui.tap(step, signal);
-        await sleep(600, signal);            // let the transition settle
+        await this.settleAfter('tap', 600);  // let the transition settle
         return;
 
       case 'type':
         await this.ui.type(step.text, signal);
-        await sleep(300, signal);
+        await this.settleAfter('type', 300);
         return;
 
       case 'clear_text':
@@ -145,24 +325,24 @@ export class StepExecutor {
 
       case 'press_enter':
         await this.ui.pressEnter(signal);
-        await sleep(600, signal);
+        await this.settleAfter('press_enter', 600);
         return;
 
       case 'swipe':
         await this.ui.swipe(step, signal);
-        await sleep(500, signal);
+        await this.settleAfter('swipe', 500);
         return;
 
       case 'gesture': {
         const screen = this.lastScreen ?? await this.refresh();
         await this.ui.gesture(step.preset, screen, step.durationMs, signal);
-        await sleep(500, signal);
+        await this.settleAfter('gesture', 500);
         return;
       }
 
       case 'button':
         await this.ui.button(step.button, step.durationMs, signal);
-        await sleep(800, signal);
+        await this.settleAfter('button', 800);
         return;
 
       case 'pinch': {
@@ -178,7 +358,7 @@ export class StepExecutor {
           ...(step.durationMs ? { durationMs: step.durationMs } : {}),
         }, signal);
         const drove = Date.now() - t0;
-        await sleep(700, signal);
+        await this.settleAfter('pinch', 700);
         return describePinchDrive(r, drove);
       }
 
@@ -195,7 +375,7 @@ export class StepExecutor {
           x1: cx - gap / 2, y1: cy, x2: cx + gap / 2, y2: cy, width, height, holdMs,
         }, signal);
         const drove = Date.now() - t0;
-        await sleep(700, signal);
+        await this.settleAfter('two_finger_press', 700);
         return `two-finger press at (${Math.round(cx)},${Math.round(cy)}), gap ${Math.round(gap)}pt, ` +
           `no travel, held ${holdMs}ms, drove ${(drove / 1000).toFixed(2)}s`;
       }
@@ -208,7 +388,7 @@ export class StepExecutor {
           width, height,
           ...(step.durationMs ? { durationMs: step.durationMs } : {}),
         }, signal);
-        await sleep(700, signal);
+        await this.settleAfter('pan', 700);
         return;
       }
 
@@ -223,7 +403,7 @@ export class StepExecutor {
           x = hit.center.x; y = hit.center.y;
         }
         await this.requireTouch().doubleTap(x, y, signal);
-        await sleep(600, signal);
+        await this.settleAfter('double_tap', 600);
         return;
       }
 
@@ -254,6 +434,14 @@ export class StepExecutor {
         return;
 
       case 'open_url': {
+        // In-app through the probe: no consent sheet, and nothing to wait
+        // for but the app itself.
+        const via = step.via ?? (this.probe ? 'app' : 'simctl');
+        if (via === 'app') {
+          const opened = await this.openInApp(step.url);
+          if (opened) return opened;
+        }
+
         await this.devices.openUrl(udid, step.url);
         if (this.devices.platform !== 'ios') {
           await sleep(1500, signal);
@@ -268,13 +456,13 @@ export class StepExecutor {
           kind: 'note',
           text: `iOS asked ${JSON.stringify(sheet)} before handing ${step.url} to the app; tapped Open`,
         });
-        await sleep(1200, signal);
+        await this.settleAfter('open_url', 1200);
         return `open ${step.url} (answered the system's consent sheet)`;
       }
 
       case 'appearance':
         await this.devices.setAppearance(udid, step.mode);
-        await sleep(800, signal);
+        await this.settleAfter('appearance', 800);
         return;
 
       case 'permission':
@@ -287,6 +475,12 @@ export class StepExecutor {
         return;
       }
 
+      case 'wait_idle':
+        return this.waitIdle(step.timeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS, step.quietMs ?? 200);
+
+      case 'assert_request':
+        return this.assertRequest(step);
+
       default: {
         const never: never = step;
         const bad = (never as { action?: unknown }).action;
@@ -295,6 +489,104 @@ export class StepExecutor {
           `Valid actions: ${Object.keys(STEP_KEYS).sort().join(', ')}`);
       }
     }
+  }
+
+  /**
+   * open_url through the probe. Returns the step's description when the app
+   * took the URL; null to fall back to the system path, with a note.
+   */
+  private async openInApp(url: string): Promise<string | null> {
+    const probe = this.probe;
+    if (!probe) {
+      this.store.trace(this.ctx.runId, { kind: 'note', text: `open_url via "app" needs the probe, which is not attached; used the system path` });
+      return null;
+    }
+
+    try {
+      const result = await probe.client.openUrl(url);
+      probe.succeeded();
+      if (result.opened) {
+        await this.settleAfter('open_url', 1200);
+        return `open ${url} in the app, through the probe`;
+      }
+      this.store.trace(this.ctx.runId, {
+        kind: 'note',
+        text: `the app did not take ${url} in-process${result.error ? ` (${result.error})` : ''}; used the system path`,
+      });
+    } catch (e) {
+      probe.failed((e as Error).message);
+      this.store.trace(this.ctx.runId, { kind: 'note', text: `the probe could not open ${url} (${(e as Error).message}); used the system path` });
+    }
+    return null;
+  }
+
+  /**
+   * wait_idle: the caller asked for idleness, so a settle that times out is
+   * an error naming what was busy. Without a probe (it could not attach, or
+   * the daemon has it switched off) the run is not failed for it: it waits a
+   * fixed time and says so.
+   */
+  private async waitIdle(timeoutMs: number, quietMs: number): Promise<string> {
+    const probe = this.probe;
+    if (!probe) {
+      const fixed = Math.min(timeoutMs, 2000);
+      await sleep(fixed, this.ctx.signal);
+      this.noteSettle({ via: 'sleep', waitedMs: fixed, fallbackMs: fixed });
+      return `wait_idle without a probe: waited a fixed ${fixed}ms instead`;
+    }
+
+    const result = await probe.client.waitSettled(timeoutMs, quietMs);
+    probe.succeeded();
+    this.noteSettle({
+      via: 'probe', waitedMs: Math.round(result.elapsedMs), fallbackMs: 0,
+      settled: result.settled, settledAtMs: result.settledAtMs,
+      ...(result.busy.length ? { busy: result.busy } : {}),
+    });
+    if (!result.settled) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for the app to settle: ${result.busy.join(', ') || 'still redrawing'}`);
+    }
+    return `app settled after ${Math.round(result.elapsedMs)}ms`;
+  }
+
+  /**
+   * assert_request: poll the probe's request log for a completed request
+   * matching the glob, method and status. A miss fails the run, as `assert`
+   * does. Without a probe it cannot be checked at all, which is an error --
+   * never a pass.
+   */
+  private async assertRequest(step: Extract<Step, { action: 'assert_request' }>): Promise<string> {
+    const probe = this.probe;
+    const want = `${step.method ? `${step.method.toUpperCase()} ` : ''}${step.urlPattern}${step.status !== undefined ? ` -> ${step.status}` : ''}`;
+    if (!probe) {
+      throw new Error(`assert_request (${want}) needs the probe, which is not attached` +
+        `${this.ctx.probe?.detached ? `: ${this.ctx.probe.detached}` : ''}; the request log cannot be checked`);
+    }
+
+    const timeoutMs = step.timeoutMs ?? 10_000;
+    const deadline = Date.now() + timeoutMs;
+    let seen: ProbeNetworkRequest[] = [];
+
+    for (;;) {
+      try {
+        seen = (await probe.client.network(0)).requests;
+        probe.absorb(seen, this.stepAt);
+      } catch (e) {
+        probe.failed((e as Error).message);
+        if (!this.probe) throw new Error(`assert_request (${want}): the probe stopped answering`);
+      }
+
+      const hit = seen.find((request) => request.state === 'completed' && requestMatches(request, step));
+      if (hit) return `assert request ${hit.method} ${hit.url} -> ${hit.status ?? '?'}`;
+
+      if (Date.now() >= deadline || this.ctx.signal.aborted) break;
+      await sleep(100, this.ctx.signal);
+    }
+
+    if (this.ctx.signal.aborted) throw new Error('aborted');
+    const near = seen.filter((request) => globMatches(step.urlPattern, request.url)).slice(-3)
+      .map((request) => `${request.method} ${request.url} ${request.state}${request.status !== undefined ? ` ${request.status}` : ''}`);
+    throw new AssertionFailed(`no completed request matching ${want} within ${timeoutMs}ms` +
+      (near.length ? `; saw ${near.join('; ')}` : '') + (step.note ? ` (${step.note})` : ''));
   }
 
   /** Save a named PNG into the run directory and index it on the run. */
@@ -343,8 +635,28 @@ export class StepExecutor {
       kind: ok ? 'step' : 'error',
       text: ok ? (detail ?? describeStep(step)) : `${describeStep(step)} -- FAILED: ${error}`,
       step, ok, durationMs,
+      ...(this.pendingSettle ? { settle: this.pendingSettle } : {}),
     });
   }
+}
+
+/** Whether a process is still running. Simulator apps are host processes. */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function requestMatches(
+  request: ProbeNetworkRequest,
+  want: { urlPattern: string; method?: string; status?: number },
+): boolean {
+  if (want.method && request.method.toUpperCase() !== want.method.toUpperCase()) return false;
+  if (want.status !== undefined && request.status !== want.status) return false;
+  return globMatches(want.urlPattern, request.url);
 }
 
 /**
@@ -374,10 +686,12 @@ export const STEP_KEYS: Record<string, readonly string[]> = {
   wait_for: ['id', 'label', 'timeoutMs'],
   assert: ['id', 'label', 'timeoutMs', 'note'],
   screenshot: ['name', 'note'],
-  open_url: ['url'],
+  open_url: ['url', 'via'],
   appearance: ['mode'],
   permission: ['service', 'grant'],
   describe_ui: [],
+  wait_idle: ['timeoutMs', 'quietMs'],
+  assert_request: ['urlPattern', 'method', 'status', 'timeoutMs', 'note'],
 };
 
 /** Parameters without which an action cannot be carried out. Missing ones used
@@ -394,6 +708,7 @@ const STEP_REQUIRED: Record<string, readonly string[]> = {
   open_url: ['url'],
   appearance: ['mode'],
   permission: ['service', 'grant'],
+  assert_request: ['urlPattern'],
 };
 
 /** Actions that need at least one of a set, rather than all of it. */
@@ -408,7 +723,7 @@ const STEP_ONE_OF: Record<string, readonly string[]> = {
 const NUMERIC_KEYS = new Set([
   'x', 'y', 'startX', 'startY', 'endX', 'endY', 'cx', 'cy', 'scale',
   'startSpread', 'endSpread', 'gap', 'holdMs', 'durationMs', 'ms',
-  'timeoutMs', 'waitTimeoutMs',
+  'timeoutMs', 'waitTimeoutMs', 'quietMs', 'status',
 ]);
 
 /** Throws if a submitted step names an action or a parameter the harness does
@@ -446,6 +761,25 @@ export function validateSteps(steps: unknown[]): void {
       if (!NUMERIC_KEYS.has(k) || v === undefined) continue;
       if (typeof v !== 'number' || !Number.isFinite(v)) {
         throw new Error(`${where} (${action}): "${k}" must be a finite number, got ${JSON.stringify(v)}`);
+      }
+    }
+
+    if (action === 'open_url' && step['via'] !== undefined && step['via'] !== 'app' && step['via'] !== 'simctl') {
+      throw new Error(`${where} (open_url): "via" must be "app" or "simctl"`);
+    }
+    if (action === 'assert_request') {
+      const pattern = step['urlPattern'];
+      if (typeof pattern !== 'string' || !pattern || pattern.length > 2048) {
+        throw new Error(`${where} (assert_request): "urlPattern" must be a non-empty string of at most 2048 characters`);
+      }
+      if (step['method'] !== undefined && (typeof step['method'] !== 'string' || !/^[A-Za-z]{1,16}$/.test(step['method']))) {
+        throw new Error(`${where} (assert_request): "method" must be an HTTP method such as "GET"`);
+      }
+    }
+    for (const key of ['timeoutMs', 'quietMs'] as const) {
+      const value = step[key];
+      if (PROBE_STEPS.includes(action) && typeof value === 'number' && (value < 0 || value > 60_000)) {
+        throw new Error(`${where} (${action}): "${key}" must be between 0 and 60000`);
       }
     }
   });
@@ -577,6 +911,10 @@ export function describeStep(step: Step): string {
     case 'appearance': return `switch to ${step.mode} mode`;
     case 'permission': return `${step.grant ? 'grant' : 'revoke'} ${step.service}`;
     case 'swipe': return `swipe (${step.startX},${step.startY}) -> (${step.endX},${step.endY})`;
+    case 'wait_idle': return 'wait until the app is idle';
+    case 'assert_request':
+      return `assert a request ${step.method ? `${step.method.toUpperCase()} ` : ''}${step.urlPattern}` +
+        `${step.status !== undefined ? ` -> ${step.status}` : ''} completed`;
     default: return step.action.replace(/_/g, ' ');
   }
 }

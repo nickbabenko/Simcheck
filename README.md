@@ -150,6 +150,22 @@ after every erase -- is held behind SpringBoard's **"Open in '<App>'?"** sheet.
 `open_url` watches for it for about two seconds, taps Open, and leaves a trace
 note saying so. Recycling a device cancels any such sheets left stacked up.
 
+### The in-app probe (iOS, opt-in)
+
+`"probe": true` injects the greybox probe (`@simbase/probe`, configured with
+`probeDylib`) into the app. Every step then waits until the app says it has
+settled -- bounded by `settleTimeoutMs`, 10s by default -- instead of a fixed
+sleep, and each trace line records how it waited. Two steps need it:
+`wait_idle` (`timeoutMs`, `quietMs`) and `assert_request` (`urlPattern`, a glob
+where `*` is the only wildcard, plus optional `method`, `status`, `timeoutMs`;
+a miss fails the run, like `assert`). `open_url` goes through the app
+(`"via": "app"`, no consent sheet) unless you say `"via": "simctl"`.
+
+The run also keeps `network.json` and `console.log`, readable only by the
+token that submitted it unless the run sets `"evidence": {"network": "public"}`.
+The probe never fails a run: if it cannot attach, the run uses fixed waits and
+says why. `probe: "off"` (SIMCHECK_PROBE=off) switches it off daemon-wide.
+
 ### Multi-touch
 
 `pinch`, `pan` and `double_tap` are genuine two-contact HID input, via

@@ -4,8 +4,9 @@ import path from 'node:path';
 import type { Config } from './config.js';
 import type { Pool } from './pool.js';
 import type { Store } from './store.js';
-import { validateSteps } from './steps.js';
+import { validateSteps, PROBE_STEPS } from './steps.js';
 import { assertSafeLaunchOptions } from './launchguard.js';
+import { resolveProbe } from './ios/probe.js';
 import type { Runner } from './runner.js';
 import type { Scheduler } from './scheduler.js';
 import type { AppSpec, Run, RunRequest, Step } from './types.js';
@@ -85,6 +86,7 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
     return send(res, 200, {
       ok: true, version: 4, llm: d.llmName, pool: d.pool.list().length, edge: d.edge.mode,
       platforms: d.platforms.available(),
+      probe: probeHealth(d.cfg),
     });
   }
 
@@ -375,6 +377,22 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
       return void fs.createReadStream(file).pipe(res);
     }
 
+    if (method === 'GET' && sub && Object.hasOwn(PRIVATE_EVIDENCE, sub)) {
+      const field = PRIVATE_EVIDENCE[sub]!;
+      const isSubmitter = run.submittedBy?.tokenId === who.id;
+      const isPublic = run.request.evidence?.network === 'public';
+      // A 404, not a 403: another token learns nothing about whether the
+      // run captured any.
+      if (!run.artifacts[field] || (!isSubmitter && !isPublic)) {
+        throw new HttpError(404, `no ${sub} for this run`);
+      }
+      const file = safeJoin(d.store.dir(run.id), sub);
+      if (!fs.existsSync(file)) throw new HttpError(404, `no ${sub} for this run`);
+      const type = sub.endsWith('.json') ? 'application/json' : 'text/plain; charset=utf-8';
+      res.writeHead(200, { 'content-type': type, 'cache-control': 'private, no-store' });
+      return void fs.createReadStream(file).pipe(res);
+    }
+
     if (method === 'GET' && (sub === 'app.log' || sub === 'build.log')) {
       const file = safeJoin(d.store.dir(run.id), sub);
       if (!fs.existsSync(file)) throw new HttpError(404, `no ${sub} for this run`);
@@ -501,6 +519,7 @@ async function submit(d: Deps, body: RunRequest, who: Identity, remote: string, 
   } catch (e) {
     throw new HttpError(400, (e as Error).message);
   }
+  validateProbeRequest(body, platform);
 
   // Resolve the build host now rather than at run time: a caller should learn
   // straight away that a URL is unreachable, instead of polling a run that was
@@ -684,6 +703,64 @@ function validate(d: Deps, body: RunRequest): void {
   }
 }
 
+/** Whether `probe: true` runs get the probe here, and why not. Resolved on
+ *  each call: cheap, and it notices a dylib being rebuilt. */
+function probeHealth(cfg: Config): { available: boolean; reason?: string } {
+  const availability = resolveProbe(cfg);
+  return 'unavailable' in availability
+    ? { available: false, reason: availability.unavailable }
+    : { available: true };
+}
+
+/**
+ * `probe` and what depends on it. Refused here rather than mid-run: a step
+ * that needs the probe on a run that cannot have one is a mistake the caller
+ * should hear about before a device is leased.
+ */
+function validateProbeRequest(body: RunRequest, platform: PlatformId): void {
+  if (body.probe !== undefined && typeof body.probe !== 'boolean') {
+    throw new HttpError(400, 'probe must be true or false');
+  }
+  if (body.probe && platform !== 'ios') {
+    throw new HttpError(400, 'probe is iOS simulator only; an Android run cannot have it');
+  }
+  if (body.probe && (body.xctest || body.instrumentation)) {
+    throw new HttpError(400, 'probe cannot be combined with xctest: the test runner launches the app itself');
+  }
+
+  const needsProbe = (body.steps ?? []).findIndex((step) =>
+    PROBE_STEPS.includes(step.action) || (step.action === 'open_url' && step.via === 'app'));
+  if (needsProbe >= 0 && !body.probe) {
+    const step = body.steps![needsProbe]!;
+    const what = step.action === 'open_url' ? 'open_url with via "app"' : step.action;
+    throw new HttpError(400, `steps[${needsProbe}] (${what}) needs the in-app probe: set "probe": true (iOS only)`);
+  }
+
+  if (body.settleTimeoutMs !== undefined) {
+    const valid = typeof body.settleTimeoutMs === 'number' && body.settleTimeoutMs >= 200 && body.settleTimeoutMs <= 60_000;
+    if (!valid) throw new HttpError(400, 'settleTimeoutMs must be a number between 200 and 60000');
+    if (!body.probe) throw new HttpError(400, 'settleTimeoutMs only applies with "probe": true');
+  }
+
+  const network = body.evidence?.network;
+  if (body.evidence !== undefined && (typeof body.evidence !== 'object' || body.evidence === null)) {
+    throw new HttpError(400, 'evidence must be an object, e.g. { "network": "private" }');
+  }
+  if (network !== undefined && network !== 'private' && network !== 'public') {
+    throw new HttpError(400, 'evidence.network must be "private" or "public"');
+  }
+}
+
+/**
+ * Probe evidence: the app's own requests (URLs, headers, redacted bodies) and
+ * its stdout/stderr. Private by default: only the token that submitted the
+ * run reads it, unless the run opted in with evidence.network "public".
+ */
+const PRIVATE_EVIDENCE: Record<string, 'networkLog' | 'consoleLog'> = {
+  'network.json': 'networkLog',
+  'console.log': 'consoleLog',
+};
+
 /** Run media served by GET /v1/runs/:id/artifacts/:name, and where the run
  *  record says each one exists. Nothing else in the run directory is reachable
  *  through that route. */
@@ -737,6 +814,9 @@ function publicRun(d: Deps, run: Run) {
       })),
       ...(run.artifacts.video ? { video: `/v1/runs/${run.id}/artifacts/${run.artifacts.video}` } : {}),
       ...(run.artifacts.preview ? { preview: `/v1/runs/${run.id}/artifacts/${run.artifacts.preview}` } : {}),
+      // Readable only by the submitting token unless the run made them public.
+      ...(run.artifacts.networkLog ? { network: `/v1/runs/${run.id}/network.json` } : {}),
+      ...(run.artifacts.consoleLog ? { console: `/v1/runs/${run.id}/console.log` } : {}),
     },
     dir: d.store.dir(run.id),
   };

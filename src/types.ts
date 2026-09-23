@@ -122,10 +122,20 @@ export type Step =
    *  that did not land fails the run instead of passing it silently. */
   | { action: 'assert'; id?: string; label?: string; timeoutMs?: number; note?: string }
   | { action: 'screenshot'; name: string; note?: string }
-  | { action: 'open_url'; url: string }
+  /** `via: "app"` hands the URL to the app through the probe (no system
+   *  consent sheet); `"simctl"` is the system path. Default: app when the
+   *  probe is attached, simctl otherwise. */
+  | { action: 'open_url'; url: string; via?: 'app' | 'simctl' }
   | { action: 'appearance'; mode: 'light' | 'dark' }
   | { action: 'permission'; service: string; grant: boolean }
-  | { action: 'describe_ui' };
+  | { action: 'describe_ui' }
+  /** Probe only: block until the app reports itself settled. A timeout is an
+   *  error: the caller asked for idleness explicitly. */
+  | { action: 'wait_idle'; timeoutMs?: number; quietMs?: number }
+  /** Probe only: a completed request matching `urlPattern` (a glob, `*` =
+   *  any run of characters, matched against the redacted URL), and `method`
+   *  / `status` when given. A miss fails the run, like `assert`. */
+  | { action: 'assert_request'; urlPattern: string; method?: string; status?: number; timeoutMs?: number; note?: string };
 
 export type GesturePreset =
   | 'scroll-up' | 'scroll-down' | 'scroll-left' | 'scroll-right'
@@ -222,6 +232,16 @@ export interface RunRequest {
    *  and attach `video.mp4` and a `preview.gif` to the run. Off by default.
    *  Best-effort: a recording that fails is a trace note, not a failed run. */
   record?: boolean;
+  /** iOS simulator only: attach the in-app probe for settle detection,
+   *  network and console evidence. Off by default. The probe never fails a
+   *  run: when it cannot attach, the run uses fixed waits and says so. */
+  probe?: boolean;
+  /** With `probe`: how long one settle may wait before the step moves on
+   *  anyway. Default 10s. */
+  settleTimeoutMs?: number;
+  /** Who may read the probe's network.json / console.log. Private (the
+   *  submitting token only) unless set to 'public'. */
+  evidence?: { network?: 'private' | 'public' };
   /** Safety valve on the NL agent loop. */
   maxActions?: number;
   label?: string;
@@ -267,6 +287,10 @@ export interface RunTimings {
   /** Converting a recording into video.mp4 and preview.gif. Runs after the
    *  device is back in the pool, so it is in neither occupancy nor total. */
   recordMs?: number;
+  /** Fixed sleeps avoided by probe settling: the sum over probe-settled
+   *  steps of (the fixed wait it replaced - what it actually waited). Can be
+   *  negative, when an app took longer to settle than the sleep allowed. */
+  settleSavedMs?: number;
 }
 
 export type PhaseKey = 'prepareMs' | 'preResetMs' | 'installMs' | 'launchMs' | 'stepsMs'
@@ -280,6 +304,26 @@ export interface TraceEntry {
   screenshot?: string;
   durationMs?: number;
   ok?: boolean;
+  /** How the step waited for the app afterwards (probe runs only). */
+  settle?: StepSettle;
+}
+
+/** One step's wait for the app to settle. */
+export interface StepSettle {
+  /** 'probe' when the app said it had settled (or timed out saying why);
+   *  'sleep' for the fixed wait used without one. */
+  via: 'probe' | 'sleep';
+  waitedMs: number;
+  /** The fixed wait this replaced. */
+  fallbackMs: number;
+  settled?: boolean;
+  settledAtMs?: number | null;
+  /** What was still busy when a settle timed out. */
+  busy?: string[];
+  /** A system sheet or alert AXe saw after the settle, which the probe
+   *  cannot see. */
+  systemUi?: string;
+  probeError?: string;
 }
 
 export interface Screenshot {
@@ -329,6 +373,9 @@ export interface Run {
     /** `video.mp4` and `preview.gif`, relative to the run directory, when
      *  the run asked to be recorded and the recording survived. */
     video?: string; preview?: string;
+    /** Probe evidence: `network.json` and `console.log`. Private to the
+     *  submitting token unless the run set `evidence.network: 'public'`. */
+    networkLog?: string; consoleLog?: string;
   };
   /** Per-phase timings, filled in as the run progresses. `resetMs`,
    *  `occupancyMs` and `totalMs` land after the run is terminal, once the
