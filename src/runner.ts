@@ -11,7 +11,7 @@ import type { PooledDevice, ResetPolicy, Run, Step } from './types.js';
 import { isNativeTestMode } from './types.js';
 import { StepExecutor, AssertionFailed, lintDeepLinks } from './steps.js';
 import { phase, recordPhase, mergeTimings, elapsedMs, monotonic } from './timings.js';
-import { decideInstall, decideRelease, tenantOf } from './warm.js';
+import { decideAndroidPreRunErase, decideInstall, decideRelease, tenantOf } from './warm.js';
 import { runScenario } from './agent.js';
 import { writeReport } from './report.js';
 import { transcode, RAW_VIDEO } from './video.js';
@@ -149,6 +149,15 @@ export class Runner {
       });
 
       /* -- install and launch --------------------------------------------- */
+      const wipeReason = decideAndroidPreRunErase({
+        platform: device.platform, device: this.pool.get(device.udid) ?? device, tenant,
+      });
+      if (wipeReason) {
+        this.store.trace(run.id, { kind: 'note', text: wipeReason });
+        await phase(this.store, run.id, 'preResetMs', () => this.pool.eraseLeased(device.udid, signal));
+        this.store.update(run.id, { warm: { cacheHit: false, reason: wipeReason, erased: true, resetPolicyRequested: requestedPolicy } });
+      }
+
       if (app?.appPath && bundleId) {
         const id = bundleId;
         const appPath = app.appPath;
@@ -183,7 +192,7 @@ export class Runner {
         this.store.update(run.id, {
           warm: {
             cacheHit: reused, reason,
-            ...(decision.erase ? { erased: true } : {}),
+            ...(decision.erase || wipeReason ? { erased: true } : {}),
             resetPolicyRequested: requestedPolicy,
           },
         });
@@ -373,7 +382,9 @@ export class Runner {
         bundleId,
         uninstall: installedByUs,
         policy: usedPolicy,
-        ...(installedByUs ? { tenant } : {}),
+        // On Android any run can leave files in shared storage, whoever
+        // installed the app, so the device always learns who used it.
+        ...(installedByUs || device.platform === 'android' ? { tenant } : {}),
         ...(usedPolicy === 'relaunch' && installedByUs && bundleId && appHash ? { keep: { bundleId, appHash } } : {}),
       });
       const resetMs = elapsedMs(t0, monotonic());

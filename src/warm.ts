@@ -17,6 +17,7 @@
  *  - A run that ends error/timeout/cancelled never leaves its app behind.
  */
 import type { PooledDevice, ResetPolicy, Run, RunStatus } from './types.js';
+import type { PlatformId } from './device.js';
 
 /**
  * The tenant a run belongs to. A caller-supplied `tenant` is namespaced under
@@ -67,6 +68,36 @@ export function decideInstall(opts: {
     return { action: 'install', erase: true, reason: 'cached build belongs to another tenant; erasing before install' };
   }
   return { action: 'reuse', erase: false, reason: 'device already holds this exact build for this tenant' };
+}
+
+/**
+ * Whether an Android device must be wiped before this run touches it at all,
+ * and why; null when it need not be.
+ *
+ * On Android an uninstall is even less of a tenant boundary than on iOS:
+ * shared storage (/sdcard/Download, MediaStore, files written through the
+ * Storage Access Framework) belongs to no package and survives it, so the
+ * next tenant's app can read what the last one left. And a run need not
+ * install anything to leave files there -- an instrumentation suite, or an
+ * app that was already on the device, writes just as well. So on Android the
+ * check runs before every run, not only before an install, and the device
+ * records every tenant that used it.
+ */
+export function decideAndroidPreRunErase(opts: {
+  platform: PlatformId;
+  device: DeviceCacheState;
+  tenant: string;
+}): string | null {
+  const { platform, device, tenant } = opts;
+  if (platform !== 'android') return null;
+
+  if (device.dirty) {
+    return 'emulator came back from a daemon crash with unknown contents; wiping it before the run';
+  }
+  if (device.tenant && device.tenant !== tenant) {
+    return 'emulator last ran another tenant\'s run, and Android shared storage survives an uninstall; wiping it before the run';
+  }
+  return null;
 }
 
 const DIRTY: readonly RunStatus[] = ['error', 'timeout', 'cancelled'];

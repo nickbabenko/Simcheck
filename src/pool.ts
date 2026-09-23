@@ -267,9 +267,13 @@ export class Pool {
           await backend.resetPermissions(udid, opts.bundleId);
           if (d.installed?.bundleId === opts.bundleId) delete d.installed;
         }
-        // Uninstalling does not clear keychain items or the pasteboard, so
-        // whoever ran here still owns the device's residue.
-        if (opts.uninstall && opts.tenant) d.tenant = opts.tenant;
+      }
+      // Uninstalling does not clear keychain items or the pasteboard (iOS) or
+      // shared storage (Android), so whoever ran here still owns the device's
+      // residue. On Android that holds whether or not the harness installed
+      // the app, so the runner passes the tenant for every Android run.
+      if (opts.policy !== 'erase' && opts.tenant && (opts.uninstall || d.platform === 'android')) {
+        d.tenant = opts.tenant;
       }
       // Uninstalling an app does not dismiss a system alert it left on screen
       // -- that sheet belongs to the OS shell and would greet the next run.

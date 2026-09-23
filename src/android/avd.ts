@@ -227,6 +227,9 @@ export async function bootEmulator(
     gpu: string;
     bootTimeoutMs: number;
     extraArgs?: string[];
+    /** Called once the emulator has attached to adb, before Android has
+     *  finished booting. Must not throw. */
+    onAttached?: (serial: string) => Promise<void>;
   },
 ): Promise<string> {
   if (!fs.existsSync(tools.emulator)) {
@@ -273,6 +276,8 @@ export async function bootEmulator(
         `Its output is in ${logPath}`);
     }
   }
+
+  if (opts.onAttached) await opts.onAttached(serial);
 
   await waitForBoot(adb, serial, Math.max(30_000, deadline - Date.now()));
   log.info(`emulator ${name} booted as ${serial}`);

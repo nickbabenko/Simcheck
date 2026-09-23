@@ -19,6 +19,7 @@ import { prepareApp } from './build.js';
 import { runInstrumentation } from './instrument.js';
 import { readApk } from './apk.js';
 import { resolveDriverApks, installDriver, UiAutomatorTouch, type DriverApks } from './touch.js';
+import { applyGuestFirewallEarly, ensureGuestFirewall } from './firewall.js';
 
 const log = logger('android');
 
@@ -121,13 +122,20 @@ class AndroidDevices implements DeviceBackend {
 
   async boot(id: string): Promise<void> {
     const wipeData = this.pendingWipe.has(id);
+    const firewall = this.cfg.androidGuestFirewall;
     const serial = await bootEmulator(this.tools, this.adb, id, {
       logDir: this.cfg.home,
       wipeData,
       gpu: this.cfg.androidGpu,
       bootTimeoutMs: this.cfg.androidBootTimeoutMs,
+      ...(firewall !== 'off' ? { onAttached: (s: string) => applyGuestFirewallEarly(this.adb, s) } : {}),
     });
     this.pendingWipe.delete(id);
+
+    // Before anything else touches the device: an emulator whose apps can
+    // reach the host's adb server is not handed out (in "required" mode, a
+    // throw here marks it offline with the reason).
+    await ensureGuestFirewall(this.adb, serial, firewall);
 
     // Espresso explicitly requires animations off, and says so in the failure
     // when they are not: a transition in flight leaves a view VISIBLE but

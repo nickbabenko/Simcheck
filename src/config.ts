@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { PlatformId } from './device.js';
+import type { GuestFirewallMode } from './android/firewall.js';
 
 export interface Config {
   /** Where runs, artifacts, the token and the pool state live. */
@@ -93,6 +94,17 @@ export interface Config {
   androidGpu: string;
   /** How long to wait for an emulator to boot before giving up. */
   androidBootTimeoutMs: number;
+  /**
+   * Inside every emulator, 10.0.2.2 is the host's loopback: an app can reach
+   * the host's adb server (no authentication, so a shell on every other
+   * emulator) and simcheck's own API. At every boot the harness installs a
+   * guest firewall refusing that, and checks it from inside the guest.
+   *  - 'required'     an emulator where it cannot be verified goes offline (default)
+   *  - 'best-effort'  try, and log a warning when it fails
+   *  - 'off'          skip it: only for a machine that runs nobody's apps but yours
+   * Needs a google_apis system image: _playstore images refuse `adb root`.
+   */
+  androidGuestFirewall: GuestFirewallMode;
   /**
    * Who is allowed to reach the daemon at all, before token checks:
    *  - 'none'              loopback only (default, and correct on a dev machine)
@@ -203,6 +215,7 @@ const DEFAULTS: Config = {
   androidDriverDir: '',
   androidGpu: 'swiftshader_indirect',
   androidBootTimeoutMs: 300_000,
+  androidGuestFirewall: 'required',
   edgeAuth: 'none',
   edgeAllowLoopback: true,
   cloudflareTeamDomain: '',
