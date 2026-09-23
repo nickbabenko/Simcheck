@@ -361,6 +361,19 @@ async function handle(d: Deps, req: http.IncomingMessage, res: http.ServerRespon
       return void fs.createReadStream(file).pipe(res);
     }
 
+    // The recording, when the run asked for one. A fixed allowlist of names,
+    // each served only once the run record says it exists.
+    if (method === 'GET' && sub === 'artifacts') {
+      const name = rest.join('/');
+      const kind = Object.hasOwn(RUN_MEDIA, name) ? RUN_MEDIA[name] : undefined;
+      const recorded = kind && run.artifacts[kind.field] === name;
+      if (!kind || !recorded) throw new HttpError(404, `run ${run.id} has no artifact "${name}"`);
+      const file = safeJoin(d.store.dir(run.id), name);
+      if (!fs.existsSync(file)) throw new HttpError(404, `run ${run.id} has no artifact "${name}"`);
+      res.writeHead(200, { 'content-type': kind.type, 'content-length': fs.statSync(file).size });
+      return void fs.createReadStream(file).pipe(res);
+    }
+
     if (method === 'GET' && (sub === 'app.log' || sub === 'build.log')) {
       const file = safeJoin(d.store.dir(run.id), sub);
       if (!fs.existsSync(file)) throw new HttpError(404, `no ${sub} for this run`);
@@ -627,6 +640,9 @@ function validate(d: Deps, body: RunRequest): void {
   if (body.scenario && body.steps?.length) {
     throw new HttpError(400, '`scenario` and `steps` are mutually exclusive');
   }
+  if (body.record !== undefined && typeof body.record !== 'boolean') {
+    throw new HttpError(400, 'record must be true or false');
+  }
   if (body.resetPolicy !== undefined && !RESET_POLICIES.includes(body.resetPolicy)) {
     throw new HttpError(400, `resetPolicy must be one of: ${RESET_POLICIES.join(', ')}`);
   }
@@ -658,6 +674,14 @@ function validate(d: Deps, body: RunRequest): void {
     }
   }
 }
+
+/** Run media served by GET /v1/runs/:id/artifacts/:name, and where the run
+ *  record says each one exists. Nothing else in the run directory is reachable
+ *  through that route. */
+const RUN_MEDIA: Record<string, { field: 'video' | 'preview'; type: string }> = {
+  'video.mp4': { field: 'video', type: 'video/mp4' },
+  'preview.gif': { field: 'preview', type: 'image/gif' },
+};
 
 function waitForTerminal(d: Deps, runId: string, timeoutMs: number, settled = false): Promise<Run> {
   const finished = (run: Run) => (settled ? isSettled(run) : isTerminal(run.status));
@@ -702,6 +726,8 @@ function publicRun(d: Deps, run: Run) {
       screenshots: run.screenshots.map((s) => ({
         name: s.name, url: `/v1/runs/${run.id}/screenshots/${encodeURIComponent(s.name)}`,
       })),
+      ...(run.artifacts.video ? { video: `/v1/runs/${run.id}/artifacts/${run.artifacts.video}` } : {}),
+      ...(run.artifacts.preview ? { preview: `/v1/runs/${run.id}/artifacts/${run.artifacts.preview}` } : {}),
     },
     dir: d.store.dir(run.id),
   };

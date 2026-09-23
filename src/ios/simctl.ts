@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import type { ScreenRecording } from '../device.js';
 import { exec, execOk } from '../util.js';
 import { logger } from '../log.js';
 
@@ -148,4 +151,43 @@ export async function resetPrivacy(udid: string, bundleId: string): Promise<void
 export async function isInstalled(udid: string, bundleId: string): Promise<boolean> {
   const r = await exec('xcrun', ['simctl', 'get_app_container', udid, bundleId], { timeoutMs: 30_000 });
   return r.code === 0;
+}
+
+/**
+ * `simctl io <udid> recordVideo --codec=h264 --force <file>`. Resolves once
+ * simctl says "Recording started" (so the launch that follows is on film), or
+ * after 5s regardless; rejects if it exits first. SIGINT finalises the mp4.
+ */
+export function recordVideo(udid: string, file: string): Promise<ScreenRecording> {
+  const child = spawn('xcrun', ['simctl', 'io', udid, 'recordVideo', '--codec=h264', '--force', file], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  const exited = new Promise<number | null>((resolve) => {
+    child.once('exit', (code) => resolve(code));
+    child.once('error', (e) => { stderr += String(e); resolve(-1); });
+  });
+  const recording: ScreenRecording = {
+    async stop() {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGINT');
+      const kill = setTimeout(() => child.kill('SIGKILL'), 20_000);
+      const code = await exited;
+      clearTimeout(kill);
+      try {
+        if (fs.statSync(file).size > 1024) return { files: [file] };
+      } catch { /* no file */ }
+      return { files: [], note: `recordVideo produced no usable file (exit ${code}): ${stderr.trim().split('\n').pop() ?? ''}` };
+    },
+  };
+  return new Promise((resolve, reject) => {
+    const started = setTimeout(() => resolve(recording), 5_000);
+    child.stderr!.on('data', (d: Buffer) => {
+      stderr = (stderr + d.toString()).slice(-2000);
+      if (/Recording started/.test(stderr)) { clearTimeout(started); resolve(recording); }
+    });
+    void exited.then((code) => {
+      clearTimeout(started);
+      reject(new Error(`recordVideo exited (${code}) before recording: ${stderr.trim().split('\n').pop() ?? ''}`));
+    });
+  });
 }

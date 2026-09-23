@@ -94,6 +94,7 @@ class IosDevices implements DeviceBackend {
     simctl.setPrivacy(id, grant, service, appId);
   resetPermissions = (id: string, appId: string) => simctl.resetPrivacy(id, appId);
   screenshot = (id: string, outPath: string) => simctl.screenshot(id, outPath);
+  recordVideo = (id: string, outPath: string) => simctl.recordVideo(id, outPath);
 
   streamLog(id: string, app: LaunchTarget, outPath: string): LogStream | null {
     try {

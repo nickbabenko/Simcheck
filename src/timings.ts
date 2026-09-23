@@ -85,7 +85,7 @@ export interface PhaseStats { p50: number; p90: number; mean: number; n: number 
 /** Row order for tables; the derived totals come last. */
 export const BENCH_ROWS: readonly (keyof RunTimings)[] = [
   'queueMs', 'prepareMs', 'preResetMs', 'installMs', 'launchMs', 'stepsMs', 'nativeTestMs',
-  'screenshotMs', 'resetMs', 'occupancyMs', 'totalMs',
+  'screenshotMs', 'resetMs', 'occupancyMs', 'totalMs', 'recordMs',
 ];
 
 export interface BenchSummary {
@@ -134,7 +134,7 @@ export function summariseBench(runs: readonly BenchRun[]): BenchSummary {
 const LABELS: Record<string, string> = {
   queueMs: 'queue', prepareMs: 'prepare', preResetMs: 'pre-reset', installMs: 'install',
   launchMs: 'launch', stepsMs: 'steps', nativeTestMs: 'native test', screenshotMs: 'screenshot',
-  resetMs: 'reset', occupancyMs: 'occupancy', totalMs: 'total',
+  resetMs: 'reset', occupancyMs: 'occupancy', totalMs: 'total', recordMs: 'transcode',
 };
 
 /** The human table `simcheck bench` prints. */
@@ -155,6 +155,7 @@ export function formatBench(s: BenchSummary): string {
     L.push(`  prepare + install as a share of occupancy (medians): ${Math.round(s.installShare * 100)}%`);
   }
   L.push('  occupancy = device time billed: from lease to the device being reset and back in the pool');
+  if (s.phases.recordMs) L.push('  transcode = video conversion after the device is released; not device time');
   if (s.iterations < 30) L.push(`  n=${s.iterations}: the shape of a run, not a capacity number`);
   return L.join('\n');
 }

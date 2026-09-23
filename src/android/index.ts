@@ -4,7 +4,7 @@ import type { Config } from '../config.js';
 import type {
   DeviceBackend, DeviceTarget, ExistingDevice, LaunchTarget, LogStream,
   NativeTestContext, NativeTestOutcome, PlatformSupport, PrepareAppContext,
-  PreparedApp, TouchDriver,
+  PreparedApp, ScreenRecording, TouchDriver,
 } from '../device.js';
 import type { AppSpec, InstrumentationSpec } from '../types.js';
 import { logger } from '../log.js';
@@ -21,6 +21,9 @@ import { readApk } from './apk.js';
 import { resolveDriverApks, installDriver, UiAutomatorTouch, type DriverApks } from './touch.js';
 
 const log = logger('android');
+
+/** 180s each: half an hour of recording before it stops following. */
+const MAX_RECORD_SEGMENTS = 10;
 
 /**
  * Measured, not guessed: creating and first-booting a pixel_7 on an
@@ -292,6 +295,63 @@ class AndroidDevices implements DeviceBackend {
   async screenshot(id: string, outPath: string): Promise<void> {
     const serial = await this.adb.serialFor(id);
     await this.adb.execOutToFile(serial, ['screencap', '-p'], outPath, 60_000);
+  }
+
+  /**
+   * `adb shell screenrecord`, which Android caps at 180s per file. A segment
+   * that ends on that cap is followed by the next, and `stop` pulls them all;
+   * the transcoder joins them. A segment that dies within seconds means the
+   * recorder does not work here, so it is not restarted in a loop.
+   */
+  async recordVideo(id: string, outPath: string): Promise<ScreenRecording> {
+    const serial = await this.adb.serialFor(id);
+    const tag = `simcheck-${Date.now().toString(36)}`;
+    const remotes: string[] = [];
+    let stopping = false;
+    let current: ReturnType<typeof spawn> | null = null;
+    let deadNote = '';
+
+    const segment = (): void => {
+      const remote = `/sdcard/${tag}-${remotes.length}.mp4`;
+      remotes.push(remote);
+      const began = Date.now();
+      const child = spawn(this.tools.adb, ['-s', serial, 'shell', 'screenrecord',
+        '--time-limit', '180', '--bit-rate', '4000000', remote], {
+        stdio: 'ignore', env: { ...process.env, ...this.tools.env },
+      });
+      current = child;
+      child.on('error', (e) => { deadNote = `screenrecord failed to start: ${e.message}`; });
+      child.once('exit', () => {
+        if (stopping) return;
+        if (Date.now() - began < 5_000) { deadNote ||= 'screenrecord exited within seconds of starting'; return; }
+        if (remotes.length < MAX_RECORD_SEGMENTS) segment();
+      });
+    };
+    segment();
+
+    const exited = (c: ReturnType<typeof spawn> | null): Promise<void> => new Promise((resolve) => {
+      if (!c || c.exitCode !== null || c.signalCode !== null) return resolve();
+      const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } resolve(); }, 15_000);
+      c.once('exit', () => { clearTimeout(t); resolve(); });
+    });
+
+    return {
+      stop: async () => {
+        stopping = true;
+        // Interrupt on the device, so the mp4's index is written.
+        await this.adb.shellTry(serial, 'pkill -INT screenrecord', { timeoutMs: 10_000 }).catch(() => undefined);
+        await exited(current);
+        await new Promise((r) => setTimeout(r, 500));
+        const files: string[] = [];
+        for (const [i, remote] of remotes.entries()) {
+          const local = outPath.replace(/\.mp4$/, '') + `.${i}.mp4`;
+          await this.adb.rawTry(serial, ['pull', remote, local], { timeoutMs: 120_000 });
+          await this.adb.shellTry(serial, `rm -f ${remote}`, { timeoutMs: 10_000 }).catch(() => undefined);
+          try { if (fs.statSync(local).size > 1024) files.push(local); else fs.rmSync(local, { force: true }); } catch { /* not pulled */ }
+        }
+        return files.length ? { files } : { files, note: deadNote || 'screenrecord produced no usable file' };
+      },
+    };
   }
 
   /**

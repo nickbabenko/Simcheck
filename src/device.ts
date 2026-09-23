@@ -48,6 +48,15 @@ export interface ExistingDevice {
 
 export interface LogStream { kill(): void }
 
+/** A screen recording in progress. */
+export interface ScreenRecording {
+  /**
+   * Stop and finalise. Resolves with the raw mp4(s) captured -- several when
+   * the platform records in segments -- or none, with a reason. Never rejects.
+   */
+  stop(): Promise<{ files: string[]; note?: string }>;
+}
+
 /**
  * Device lifecycle and app lifecycle.
  *
@@ -91,6 +100,11 @@ export interface DeviceBackend {
   screenshot(id: string, outPath: string): Promise<void>;
   /** Best-effort capture of the app's own log output. Never fatal. */
   streamLog(id: string, app: LaunchTarget, outPath: string): LogStream | null;
+  /**
+   * Start recording the screen to `outPath` (mp4). Optional; rejects when the
+   * recorder cannot start. Best-effort evidence, so never fatal to a run.
+   */
+  recordVideo?(id: string, outPath: string): Promise<ScreenRecording>;
 }
 
 /**

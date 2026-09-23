@@ -736,6 +736,8 @@ GET    /v1/runs/:id/report                  markdown
 GET    /v1/runs/:id/screenshots             index
 GET    /v1/runs/:id/screenshots/:name       PNG
 GET    /v1/runs/:id/app.log | build.log     logs
+GET    /v1/runs/:id/artifacts/video.mp4     recording (runs submitted with record: true)
+GET    /v1/runs/:id/artifacts/preview.gif   its GIF preview
 GET    /v1/pool                             pool state
 POST   /v1/pool/devices                     add (lands as pending)
 DELETE /v1/pool/devices/:udid[?force=true]  remove
@@ -823,7 +825,17 @@ report.md                the human-readable evidence write-up
 screenshots/*.png        every named capture, plus final-state
 app.log                  the app's own log output
 build.log                xcodebuild output, when built from source
+video.mp4, preview.gif   the screen recording, with "record": true
 ```
+
+`"record": true` on a run films the device from just after install to just
+before the reset (`simctl io recordVideo` on iOS; `adb screenrecord` in
+180-second segments on Android). Once the device is back in the pool, ffmpeg
+turns it into `video.mp4` (at most 480 wide, faststart) and `preview.gif` (at
+most 15 seconds, sped up to fit). That conversion is `timings.recordMs`, which
+is in neither `occupancyMs` nor `totalMs`; `releasedAt` is written after it, so
+`wait?settled=true` returns once the video exists. A recording that fails, or
+a missing ffmpeg, is a trace note and never fails the run.
 
 ## Layout
 

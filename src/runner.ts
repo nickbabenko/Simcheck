@@ -6,7 +6,7 @@ import type { Store } from './store.js';
 import type { Llm } from './llm.js';
 import type { ArtifactStore } from './artifacts.js';
 import type { Platforms } from './platforms.js';
-import type { LaunchTarget } from './device.js';
+import type { DeviceBackend, LaunchTarget, ScreenRecording } from './device.js';
 import type { PooledDevice, ResetPolicy, Run, Step } from './types.js';
 import { isNativeTestMode } from './types.js';
 import { StepExecutor, AssertionFailed, lintDeepLinks } from './steps.js';
@@ -14,6 +14,7 @@ import { phase, recordPhase, mergeTimings, elapsedMs, monotonic } from './timing
 import { decideInstall, decideRelease, tenantOf } from './warm.js';
 import { runScenario } from './agent.js';
 import { writeReport } from './report.js';
+import { transcode, RAW_VIDEO } from './video.js';
 import { logger } from './log.js';
 import { nowIso, sleep } from './util.js';
 
@@ -79,6 +80,8 @@ export class Runner {
     let installedByUs = false;
     let appHash: string | undefined;
     let logStream: { kill(): void } | null = null;
+    let recording: ScreenRecording | null = null;
+    let rawVideo: string[] = [];
     const tenant = tenantOf(run);
     const requestedPolicy: ResetPolicy = run.request.resetPolicy ?? this.cfg.defaultResetPolicy;
 
@@ -197,6 +200,10 @@ export class Runner {
         const cur = this.store.get(run.id)!;
         this.store.update(run.id, { artifacts: { ...cur.artifacts, appLog: 'app.log' } });
       }
+
+      // After install, before launch: the film starts on the home screen and
+      // shows the app coming up.
+      if (run.request.record) recording = await this.startRecording(run.id, platform.devices, device.udid, runDir);
 
       const executor = new StepExecutor(ui, platform.devices, this.store, {
         runId: run.id,
@@ -344,6 +351,9 @@ export class Runner {
       this.aborts.delete(run.id);
       this.store.forgetSecret(run.id);
       logStream?.kill();
+      // Before the reset, so the film ends on the run's last frame rather than
+      // on the app being uninstalled.
+      if (recording) rawVideo = await this.stopRecording(run.id, recording);
 
       const finished = this.store.get(run.id)!;
       try {
@@ -389,6 +399,8 @@ export class Runner {
             text: `reset downgraded from "${requestedPolicy}" to "${usedPolicy}" -- a run that did not finish cleanly never leaves its app behind`,
           });
         }
+        // The device is back in the pool, so converting costs no device time.
+        if (rawVideo.length) await this.convertRecording(run.id, rawVideo, runDir);
         // Once more, now the reset and occupancy are known. The first write
         // stays, so a reader who wakes on the terminal status has a report.
         try {
@@ -400,5 +412,52 @@ export class Runner {
         this.store.update(run.id, { releasedAt: nowIso() });
       }
     }
+  }
+
+  /** Start recording; a failure is a trace note and the run goes on. */
+  private async startRecording(
+    runId: string, devices: DeviceBackend, udid: string, runDir: string,
+  ): Promise<ScreenRecording | null> {
+    if (!devices.recordVideo) {
+      this.store.trace(runId, { kind: 'note', text: `recording is not supported on this ${devices.deviceNoun}; the run continues without video` });
+      return null;
+    }
+    try {
+      return await devices.recordVideo(udid, path.join(runDir, RAW_VIDEO));
+    } catch (e) {
+      this.store.trace(runId, { kind: 'note', text: `could not start recording: ${(e as Error).message}; the run continues without video` });
+      return null;
+    }
+  }
+
+  private async stopRecording(runId: string, recording: ScreenRecording): Promise<string[]> {
+    try {
+      const { files, note } = await recording.stop();
+      if (note) this.store.trace(runId, { kind: 'note', text: `recording: ${note}` });
+      return files;
+    } catch (e) {
+      this.store.trace(runId, { kind: 'note', text: `recording did not stop cleanly: ${(e as Error).message}` });
+      return [];
+    }
+  }
+
+  /** Raw capture -> video.mp4 + preview.gif, timed as recordMs. Never throws. */
+  private async convertRecording(runId: string, raw: string[], runDir: string): Promise<void> {
+    const t0 = monotonic();
+    try {
+      const out = await transcode(raw, runDir);
+      const cur = this.store.get(runId)!;
+      this.store.update(runId, {
+        artifacts: {
+          ...cur.artifacts,
+          ...(out.video ? { video: out.video } : {}),
+          ...(out.preview ? { preview: out.preview } : {}),
+        },
+      });
+      for (const note of out.notes) this.store.trace(runId, { kind: 'note', text: `recording: ${note}` });
+    } catch (e) {
+      this.store.trace(runId, { kind: 'note', text: `recording could not be converted: ${(e as Error).message}` });
+    }
+    mergeTimings(this.store, runId, { recordMs: elapsedMs(t0, monotonic()) });
   }
 }

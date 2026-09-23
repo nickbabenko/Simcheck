@@ -218,6 +218,10 @@ export interface RunRequest {
    *  tenant's build is erased before this run installs anything: iOS keeps
    *  permission grants, keychain items and the pasteboard past an uninstall. */
   tenant?: string;
+  /** Record the screen from just after install to just before the reset,
+   *  and attach `video.mp4` and a `preview.gif` to the run. Off by default.
+   *  Best-effort: a recording that fails is a trace note, not a failed run. */
+  record?: boolean;
   /** Safety valve on the NL agent loop. */
   maxActions?: number;
   label?: string;
@@ -260,6 +264,9 @@ export interface RunTimings {
   occupancyMs?: number;
   /** Submit -> device released: queue + occupancy. */
   totalMs?: number;
+  /** Converting a recording into video.mp4 and preview.gif. Runs after the
+   *  device is back in the pool, so it is in neither occupancy nor total. */
+  recordMs?: number;
 }
 
 export type PhaseKey = 'prepareMs' | 'preResetMs' | 'installMs' | 'launchMs' | 'stepsMs'
@@ -317,7 +324,12 @@ export interface Run {
     cases: { name: string; status: string; failure?: string; durationSeconds?: number }[];
   };
   /** Relative paths inside the run directory. */
-  artifacts: { report?: string; appLog?: string; buildLog?: string; testLog?: string };
+  artifacts: {
+    report?: string; appLog?: string; buildLog?: string; testLog?: string;
+    /** `video.mp4` and `preview.gif`, relative to the run directory, when
+     *  the run asked to be recorded and the recording survived. */
+    video?: string; preview?: string;
+  };
   /** Per-phase timings, filled in as the run progresses. `resetMs`,
    *  `occupancyMs` and `totalMs` land after the run is terminal, once the
    *  device has been reset -- wait for `releasedAt` (or use
