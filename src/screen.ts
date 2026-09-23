@@ -87,3 +87,17 @@ export function renderScreen(screen: Screen): string {
   const tail = screen.truncated ? `\n  ... ${screen.truncated} more elements hidden (scroll to reach them)` : '';
   return `${head}\n${lines.join('\n')}${tail}`;
 }
+
+/**
+ * Buttons drawn inside a modal, in reading order. A flattened tree keeps no
+ * parent links, so containment is by frame -- which also keeps the home
+ * screen's icons behind a system sheet out of the answer.
+ */
+export function modalButtons(screen: Screen, modal: UiElement): UiElement[] {
+  const box = modal.frame;
+  return screen.elements
+    .filter((e) => e.type === 'Button' && e.label &&
+      e.center.x >= box.x && e.center.x <= box.x + box.width &&
+      e.center.y >= box.y && e.center.y <= box.y + box.height)
+    .sort((a, b) => a.frame.y - b.frame.y || a.frame.x - b.frame.x);
+}

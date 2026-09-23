@@ -145,6 +145,11 @@ checks:
 ]
 ```
 
+On iOS, the first `open_url` to a custom scheme on a simulator -- and the first
+after every erase -- is held behind SpringBoard's **"Open in '<App>'?"** sheet.
+`open_url` watches for it for about two seconds, taps Open, and leaves a trace
+note saying so. Recycling a device cancels any such sheets left stacked up.
+
 ### Multi-touch
 
 `pinch`, `pan` and `double_tap` are genuine two-contact HID input, via

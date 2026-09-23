@@ -6,6 +6,7 @@ import type { DeviceBackend, LaunchTarget, TouchDriver, UiDriver } from './devic
 import { renderScreen, type Screen } from './screen.js';
 import { sleep, slug, nowIso } from './util.js';
 import { logger } from './log.js';
+import { acceptOpenIn } from './ios/consent.js';
 
 const log = logger('steps');
 
@@ -39,6 +40,9 @@ export class AssertionFailed extends Error {}
  */
 export class StepExecutor {
   private lastScreen: Screen | null = null;
+  /** How long `open_url` watches for iOS's "Open in …?" consent sheet. It is
+   *  also the settle time when none appears. Tests shorten it. */
+  consentWindowMs = 2000;
 
   constructor(
     private ui: UiDriver,
@@ -236,10 +240,24 @@ export class StepExecutor {
         await this.capture(step.name, step.note);
         return;
 
-      case 'open_url':
+      case 'open_url': {
         await this.devices.openUrl(udid, step.url);
-        await sleep(1500, signal);
-        return;
+        if (this.devices.platform !== 'ios') {
+          await sleep(1500, signal);
+          return;
+        }
+        // A custom scheme's first open on a device -- and the first after
+        // every erase -- waits behind SpringBoard's "Open in …?" sheet, and
+        // nothing reaches the app until it is answered.
+        const sheet = await acceptOpenIn(this.ui, { windowMs: this.consentWindowMs, signal });
+        if (!sheet) return;
+        this.store.trace(this.ctx.runId, {
+          kind: 'note',
+          text: `iOS asked ${JSON.stringify(sheet)} before handing ${step.url} to the app; tapped Open`,
+        });
+        await sleep(1200, signal);
+        return `open ${step.url} (answered the system's consent sheet)`;
+      }
 
       case 'appearance':
         await this.devices.setAppearance(udid, step.mode);

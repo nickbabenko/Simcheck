@@ -9,6 +9,9 @@ import type { Platforms } from './platforms.js';
 import { statfsSync } from 'node:fs';
 import { logger } from './log.js';
 import { nowIso, sleep } from './util.js';
+import type { Screen, UiElement } from './screen.js';
+import { modalButtons } from './screen.js';
+import { findOpenInSheet } from './ios/consent.js';
 
 const log = logger('pool');
 
@@ -44,6 +47,8 @@ export class Pool {
    *  then an empty device list means "not loaded yet", not "none exist", and
    *  the scheduler must not provision or fail runs on the strength of it. */
   private started = false;
+  /** Pause for a SpringBoard sheet animation while sanitizing. Tests shorten it. */
+  settleMs = 400;
 
   constructor(private cfg: Config, private platforms: Platforms) {}
 
@@ -293,42 +298,61 @@ export class Pool {
     const ui = platform.ui(d.udid);
     const name = d.name;
 
-    const strayModal = async (): Promise<string | null> => {
-      const screen = await ui.describe().catch(() => null);
+    /** The topmost stray modal and the screen it was read from. describe-ui
+     *  can fail while a sheet animates in, so one failed read is retried
+     *  before concluding the screen cannot be read at all. */
+    const strayModal = async (): Promise<{ modal: UiElement; screen: Screen } | null> => {
+      let screen = await ui.describe().catch(() => null);
+      if (!screen) {
+        await sleep(this.settleMs);
+        screen = await ui.describe().catch(() => null);
+      }
       if (!screen) return null;   // cannot read it; do not block recycling on that
       const modal = screen.elements.find((e) => e.type === 'Sheet' || e.type === 'Alert');
-      return modal ? (modal.label ?? modal.type) : null;
+      return modal ? { modal, screen } : null;
     };
+    const title = (m: UiElement) => m.label ?? m.type;
 
     await ui.button('home').catch(() => {});
-    await sleep(400);
+    await sleep(this.settleMs);
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const modal = await strayModal();
-      if (!modal) return;
+    // Unanswered "Open in …?" sheets queue, one per `openurl`, so a device can
+    // carry dozens. Keep dismissing while each tap makes progress.
+    let dismissed = 0;
+    for (let attempt = 0; attempt < MAX_DISMISSALS; attempt++) {
+      const found = await strayModal();
+      if (!found) {
+        if (dismissed) log.info(`${name}: dismissed ${dismissed} leftover modal${dismissed > 1 ? 's' : ''}`);
+        return;
+      }
+      const { modal, screen } = found;
 
-      const screen = await ui.describe().catch(() => null);
-      const buttons = (screen?.elements ?? []).filter((e) => e.type === 'Button' && e.label);
-      // Prefer the declining option -- never silently grant a permission.
-      const choice = DISMISS_LABELS
+      // Only the modal's own buttons: the home screen behind it is full of
+      // buttons too, and "Books" contains "ok".
+      const buttons = modalButtons(screen, modal);
+      // Prefer the declining option -- never silently grant a permission, and
+      // never let a stale deep link through.
+      const choice = findOpenInSheet(screen)?.cancel ?? DISMISS_LABELS
         .map((want) => buttons.find((b) => b.label!.toLowerCase().includes(want)))
         .find(Boolean);
       if (!choice) break;
 
-      log.info(`${name}: dismissing leftover modal "${modal}" via "${choice.label}"`);
-      await ui.tap({ label: choice.label! }).catch(() => {});
-      await sleep(800);
+      log.info(`${name}: dismissing leftover modal "${title(modal)}" via "${choice.label}"`);
+      await ui.tap({ x: choice.center.x, y: choice.center.y }).catch(() => {});
+      dismissed++;
+      await sleep(this.settleMs * 2);
     }
 
-    if (!(await strayModal())) return;
+    const left = await strayModal();
+    if (!left) return;
 
     log.warn(`${name}: modal survived dismissal, rebooting the device`);
     await platform.devices.shutdown(d.udid);
     await platform.devices.boot(d.udid);
-    await sleep(1500);
+    await sleep(this.settleMs * 4);
 
     const remaining = await strayModal();
-    if (remaining) throw new Error(`device still shows "${remaining}" after a reboot`);
+    if (remaining) throw new Error(`device still shows "${title(remaining.modal)}" after a reboot`);
   }
 
   /** Register an extra device. It lands as `pending` and the reconcile loop
@@ -633,6 +657,9 @@ function runtimeMatches(have: string, want: string): boolean {
   const wantApi = want.match(/(\d+)/)?.[1];
   return Boolean(api && wantApi && api === wantApi && /api|android/i.test(want + have));
 }
+
+/** Stray modals dismissed one at a time before falling back to a reboot. */
+const MAX_DISMISSALS = 40;
 
 /** Dismissive button labels, most-preferred first. iOS uses a curly apostrophe. */
 const DISMISS_LABELS = [
