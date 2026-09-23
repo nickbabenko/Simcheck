@@ -114,3 +114,66 @@ for (const platform of ['linux', 'darwin']) {
     assert.equal(unwrapped.platform, 'android');
   });
 }
+
+/** Anything the store left behind in its root besides published artifacts. */
+function debris(artifacts) {
+  const root = path.dirname(artifacts.dir('x'));
+  return fs.readdirSync(root).filter((name) => name.startsWith('.'));
+}
+
+for (const platform of ['linux', 'darwin']) {
+  test(`${platform}: concurrent uploads of identical bytes both succeed with one stored copy`, async () => {
+    const artifacts = store(platform);
+    // A slow manifest read holds every upload mid-build, so all six are past
+    // the "already stored?" check before any of them publishes.
+    artifacts.setManifestReader('android', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return 'com.example.app';
+    });
+    const bytes = zipOf({ 'build/app-debug.apk': fakeApk() });
+    const uploads = Array.from({ length: 6 }, (_, i) =>
+      artifacts.accept(Readable.from([bytes]), { uploadedBy: `agent-${i}`, declaredBytes: 1e9 }));
+
+    const stored = await Promise.all(uploads);
+
+    assert.equal(new Set(stored.map((artifact) => artifact.id)).size, 1);
+    for (const artifact of stored) {
+      assert.equal(fs.existsSync(artifact.appPath), true, `${artifact.appPath} exists after the race`);
+    }
+    assert.equal(artifacts.list().length, 1);
+    assert.deepEqual(debris(artifacts), [], 'no staging or build directories left behind');
+  });
+}
+
+test('the stored appPath points at the published directory, not the private build one', async () => {
+  const artifacts = store('darwin');
+  const artifact = await artifacts.accept(Readable.from([fakeApk()]), { uploadedBy: 't', declaredBytes: 1e9 });
+
+  assert.equal(path.dirname(artifact.appPath), artifacts.dir(artifact.id));
+  assert.deepEqual(artifacts.get(artifact.id), artifact);
+});
+
+test('a half-built directory from an older crash is replaced, not reused', async () => {
+  const artifacts = store('linux');
+  const bytes = fakeApk();
+  const first = await artifacts.accept(Readable.from([bytes]), { uploadedBy: 't', declaredBytes: 1e9 });
+  fs.rmSync(path.join(artifacts.dir(first.id), 'artifact.json'));
+  fs.writeFileSync(path.join(artifacts.dir(first.id), 'stale'), 'x');
+
+  const second = await artifacts.accept(Readable.from([bytes]), { uploadedBy: 't', declaredBytes: 1e9 });
+
+  assert.equal(second.id, first.id);
+  assert.equal(fs.existsSync(path.join(artifacts.dir(first.id), 'stale')), false);
+  assert.equal(fs.existsSync(second.appPath), true);
+});
+
+test('a rejected upload leaves nothing behind', async () => {
+  const artifacts = store('linux');
+
+  await assert.rejects(
+    artifacts.accept(Readable.from([zipOf({ 'readme.txt': 'no build here' })]), { uploadedBy: 't', declaredBytes: 1e9 }),
+    /no .app bundle or .apk/);
+
+  assert.deepEqual(artifacts.list(), []);
+  assert.deepEqual(debris(artifacts), []);
+});

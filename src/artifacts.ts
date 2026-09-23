@@ -112,108 +112,155 @@ export class ArtifactStore {
       const id = hash.digest('hex').slice(0, 32);
       const dest = this.dir(id);
 
-      // Identical build already here: reuse the stored copy, but refresh the
-      // caller's metadata. Returning a stale label would misreport which branch
-      // or commit the build under test came from.
       const existing = this.get(id);
-      if (existing) {
-        const refreshed: Artifact = {
-          ...existing,
-          uploadedAt: nowIso(),
-          uploadedBy: opts.uploadedBy,
-          ...(opts.label ? { label: opts.label } : {}),
-          ...(opts.gitSha ? { gitSha: opts.gitSha } : {}),
-        };
-        fs.writeFileSync(path.join(this.dir(id), 'artifact.json'), JSON.stringify(refreshed, null, 2));
-        log.info(`artifact ${id} already stored, reusing (metadata refreshed)`);
-        return refreshed;
-      }
+      if (existing) return this.refresh(existing, opts);
 
-      fs.rmSync(dest, { recursive: true, force: true });
-      fs.mkdirSync(dest, { recursive: true });
-      const unpacked = path.join(dest, 'unpacked');
-      await unzipArchive(staging, unpacked, { platform: this.unzipOn });
-
-      // An .apk is itself a zip, so unpacking one yields its contents rather
-      // than a file. That is the tell: a manifest and dex at the top level
-      // means the upload *was* the installable, not an archive holding one.
-      if (fs.existsSync(path.join(unpacked, 'AndroidManifest.xml'))
-          && fs.readdirSync(unpacked).some((f) => f.endsWith('.dex'))) {
-        const apkPath = path.join(dest, 'app.apk');
-        fs.copyFileSync(staging, apkPath);
-        fs.rmSync(unpacked, { recursive: true, force: true });
-        return this.record(dest, {
-          id, platform: 'android', appPath: apkPath, appName: 'app.apk', bytes,
-        }, opts);
+      // Unpack into a private directory and rename it into place in one step,
+      // so two uploads of the same bytes never share a half-built directory
+      // ("ditto: .../unpacked: File exists"). Whichever finishes second finds
+      // the first one's copy and reuses it.
+      const work = path.join(this.root, `.building-${crypto.randomBytes(6).toString('hex')}`);
+      try {
+        const built = await this.unpack(staging, work, dest, { id, bytes, ...opts });
+        return this.publish(work, dest, built, opts);
+      } finally {
+        fs.rmSync(work, { recursive: true, force: true });
       }
-
-      let appPath = findApp(path.join(dest, 'unpacked'));
-
-      // GitHub Actions re-zips whatever you upload and drops the executable
-      // bit, so the usual recipe is to `ditto` the .app into a zip first --
-      // which arrives here as a zip inside a zip. Unwrap one more level rather
-      // than making every CI pipeline special-case it.
-      if (!appPath) {
-        const inner = findZip(path.join(dest, 'unpacked'));
-        if (inner) {
-          log.info(`no .app at the top level; unwrapping nested ${path.basename(inner)}`);
-          await unzipArchive(inner, path.join(dest, 'nested'), { platform: this.unzipOn });
-          appPath = findApp(path.join(dest, 'nested'));
-        }
-      }
-      if (!appPath) {
-        // A zip of an .apk is the natural Android shape, and CI produces it
-        // as readily as it produces a zipped .app.
-        const apk = findByExtension(path.join(dest, 'unpacked'), '.apk')
-          ?? findByExtension(path.join(dest, 'nested'), '.apk');
-        if (apk) {
-          return this.record(dest, {
-            id, platform: 'android', appPath: apk, appName: path.basename(apk), bytes,
-          }, opts);
-        }
-        fs.rmSync(dest, { recursive: true, force: true });
-        throw new HttpError(400, 'no .app bundle or .apk found inside the uploaded archive');
-      }
-      if (fs.existsSync(path.join(appPath, 'embedded.mobileprovision'))) {
-        fs.rmSync(dest, { recursive: true, force: true });
-        throw new HttpError(400,
-          'that is a device build -- it carries an embedded provisioning profile. ' +
-          'Simulator builds come from a "platform=iOS Simulator" destination.');
-      }
-
-      const bundleId = plist(appPath, 'CFBundleIdentifier');
-      if (!bundleId) {
-        fs.rmSync(dest, { recursive: true, force: true });
-        throw new HttpError(400, `could not read CFBundleIdentifier from ${path.basename(appPath)}/Info.plist`);
-      }
-
-      return this.record(dest, {
-        id, platform: 'ios', appPath, appName: path.basename(appPath), bytes, bundleId,
-      }, opts);
     } finally {
       fs.rmSync(staging, { force: true });
     }
   }
 
   /**
-   * Write an artifact's metadata and return it.
+   * Identical build already here: reuse the stored copy, but refresh the
+   * caller's metadata. Returning a stale label would misreport which branch
+   * or commit the build under test came from.
+   */
+  private refresh(existing: Artifact, opts: { uploadedBy: string; label?: string; gitSha?: string }): Artifact {
+    const refreshed: Artifact = {
+      ...existing,
+      uploadedAt: nowIso(),
+      uploadedBy: opts.uploadedBy,
+      ...(opts.label ? { label: opts.label } : {}),
+      ...(opts.gitSha ? { gitSha: opts.gitSha } : {}),
+    };
+    fs.writeFileSync(path.join(this.dir(existing.id), 'artifact.json'), JSON.stringify(refreshed, null, 2));
+    log.info(`artifact ${existing.id} already stored, reusing (metadata refreshed)`);
+    return refreshed;
+  }
+
+  /**
+   * Move a fully built artifact directory to its content-addressed home.
+   * rename() of a directory is atomic and refuses a non-empty target, so a
+   * concurrent upload of the same bytes that got there first wins and this
+   * one reuses its copy: same hash, same build.
+   */
+  private publish(work: string, dest: string, built: Artifact,
+    opts: { uploadedBy: string; label?: string; gitSha?: string }): Artifact {
+    // A directory with no artifact.json is debris from a crash before this
+    // change (or a failed rm); it is not a build anyone can be using.
+    if (fs.existsSync(dest) && !this.get(built.id)) fs.rmSync(dest, { recursive: true, force: true });
+    try {
+      fs.renameSync(work, dest);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      const winner = this.get(built.id);
+      if ((code === 'ENOTEMPTY' || code === 'EEXIST') && winner) return this.refresh(winner, opts);
+      throw e;
+    }
+    log.info(`stored ${built.platform} artifact ${built.id} (${built.appName}, ${(built.bytes / 1e6).toFixed(1)}MB) from ${opts.uploadedBy}`);
+    return built;
+  }
+
+  /**
+   * Unpack an upload into `work` and describe it. Paths in the returned
+   * artifact (and its artifact.json) already point under `dest`, where
+   * publish() is about to move the directory.
+   */
+  private async unpack(staging: string, work: string, dest: string, opts: {
+    id: string; bytes: number; uploadedBy: string; label?: string; gitSha?: string;
+  }): Promise<Artifact> {
+    const { id, bytes } = opts;
+    const final = (p: string): string => path.join(dest, path.relative(work, p));
+    fs.mkdirSync(work, { recursive: true });
+    const unpacked = path.join(work, 'unpacked');
+    await unzipArchive(staging, unpacked, { platform: this.unzipOn });
+
+    // An .apk is itself a zip, so unpacking one yields its contents rather
+    // than a file. That is the tell: a manifest and dex at the top level
+    // means the upload *was* the installable, not an archive holding one.
+    if (fs.existsSync(path.join(unpacked, 'AndroidManifest.xml'))
+        && fs.readdirSync(unpacked).some((f) => f.endsWith('.dex'))) {
+      const apkPath = path.join(work, 'app.apk');
+      fs.copyFileSync(staging, apkPath);
+      fs.rmSync(unpacked, { recursive: true, force: true });
+      return this.record(work, {
+        id, platform: 'android', buildPath: apkPath, appPath: final(apkPath), appName: 'app.apk', bytes,
+      }, opts);
+    }
+
+    let appPath = findApp(unpacked);
+
+    // GitHub Actions re-zips whatever you upload and drops the executable
+    // bit, so the usual recipe is to `ditto` the .app into a zip first --
+    // which arrives here as a zip inside a zip. Unwrap one more level rather
+    // than making every CI pipeline special-case it.
+    if (!appPath) {
+      const inner = findZip(unpacked);
+      if (inner) {
+        log.info(`no .app at the top level; unwrapping nested ${path.basename(inner)}`);
+        await unzipArchive(inner, path.join(work, 'nested'), { platform: this.unzipOn });
+        appPath = findApp(path.join(work, 'nested'));
+      }
+    }
+    if (!appPath) {
+      // A zip of an .apk is the natural Android shape, and CI produces it
+      // as readily as it produces a zipped .app.
+      const apk = findByExtension(unpacked, '.apk') ?? findByExtension(path.join(work, 'nested'), '.apk');
+      if (apk) {
+        return this.record(work, {
+          id, platform: 'android', buildPath: apk, appPath: final(apk), appName: path.basename(apk), bytes,
+        }, opts);
+      }
+      throw new HttpError(400, 'no .app bundle or .apk found inside the uploaded archive');
+    }
+    if (fs.existsSync(path.join(appPath, 'embedded.mobileprovision'))) {
+      throw new HttpError(400,
+        'that is a device build -- it carries an embedded provisioning profile. ' +
+        'Simulator builds come from a "platform=iOS Simulator" destination.');
+    }
+
+    const bundleId = plist(appPath, 'CFBundleIdentifier');
+    if (!bundleId) {
+      throw new HttpError(400, `could not read CFBundleIdentifier from ${path.basename(appPath)}/Info.plist`);
+    }
+
+    return this.record(work, {
+      id, platform: 'ios', buildPath: appPath, appPath: final(appPath), appName: path.basename(appPath), bytes, bundleId,
+    }, opts);
+  }
+
+  /**
+   * Write an artifact's metadata into its build directory and return it.
+   * `buildPath` is where the build sits now; `appPath` is where it will sit
+   * once the directory is published.
    *
    * The package identifier is read through the platform's own reader when one
    * is registered. A daemon that cannot serve that platform still accepts the
    * upload -- it simply cannot name what is inside, and says so by leaving
    * bundleId empty rather than guessing.
    */
-  private async record(dest: string, base: {
-    id: string; platform: PlatformId; appPath: string; appName: string; bytes: number; bundleId?: string;
+  private async record(work: string, base: {
+    id: string; platform: PlatformId; buildPath: string; appPath: string; appName: string;
+    bytes: number; bundleId?: string;
   }, opts: { uploadedBy: string; label?: string; gitSha?: string }): Promise<Artifact> {
     let bundleId = base.bundleId ?? '';
     if (!bundleId) {
       const reader = this.readers[base.platform];
       if (reader) {
         try {
-          bundleId = await reader(base.appPath);
+          bundleId = await reader(base.buildPath);
         } catch (e) {
-          fs.rmSync(dest, { recursive: true, force: true });
           throw new HttpError(400,
             `could not read the package identifier from ${base.appName}: ${(e as Error).message}`);
         }
@@ -234,9 +281,7 @@ export class ArtifactStore {
       ...(opts.label ? { label: opts.label } : {}),
       ...(opts.gitSha ? { gitSha: opts.gitSha } : {}),
     };
-    fs.mkdirSync(dest, { recursive: true });
-    fs.writeFileSync(path.join(dest, 'artifact.json'), JSON.stringify(artifact, null, 2));
-    log.info(`stored ${artifact.platform} artifact ${artifact.id} (${artifact.appName}, ${(artifact.bytes / 1e6).toFixed(1)}MB) from ${opts.uploadedBy}`);
+    fs.writeFileSync(path.join(work, 'artifact.json'), JSON.stringify(artifact, null, 2));
     return artifact;
   }
 
