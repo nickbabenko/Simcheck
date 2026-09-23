@@ -20,6 +20,7 @@ import { runInstrumentation } from './instrument.js';
 import { readApk } from './apk.js';
 import { resolveDriverApks, installDriver, UiAutomatorTouch, type DriverApks } from './touch.js';
 import { applyGuestFirewallEarly, ensureGuestFirewall } from './firewall.js';
+import { installHints, noMatchingAbiHint } from './hints.js';
 
 const log = logger('android');
 
@@ -80,7 +81,7 @@ class AndroidDevices implements DeviceBackend {
     const version = await this.adb.version();
     if (!version) {
       throw new Error(
-        `adb ("${this.tools.adb}") is not usable. Install it with: brew install --cask android-platform-tools`);
+        `adb ("${this.tools.adb}") is not usable. Install it: ${installHints().adb}`);
     }
     if (!fs.existsSync(this.tools.emulator)) {
       throw new Error(
@@ -94,7 +95,7 @@ class AndroidDevices implements DeviceBackend {
     }
     if (!this.tools.javaHome) {
       throw new Error(
-        'no JDK found, and avdmanager needs one to create an AVD. Install one with: brew install openjdk@21');
+        `no JDK found, and avdmanager needs one to create an AVD. Install one: ${installHints().jdk}`);
     }
     return `${version}, ${images.length} system image(s), JDK at ${this.tools.javaHome}`;
   }
@@ -128,6 +129,7 @@ class AndroidDevices implements DeviceBackend {
       wipeData,
       gpu: this.cfg.androidGpu,
       bootTimeoutMs: this.cfg.androidBootTimeoutMs,
+      extraArgs: this.cfg.androidEmulatorArgs ?? [],
       ...(firewall !== 'off' ? { onAttached: (s: string) => applyGuestFirewallEarly(this.adb, s) } : {}),
     });
     this.pendingWipe.delete(id);
@@ -406,7 +408,7 @@ const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 function installHint(out: string): string {
   const trimmed = out.trim().slice(0, 500);
   if (/INSTALL_FAILED_NO_MATCHING_ABIS/.test(out)) {
-    return `${trimmed}\nThe APK has no native slice this emulator can run -- on Apple silicon it needs arm64-v8a.`;
+    return `${trimmed}\n${noMatchingAbiHint()}`;
   }
   if (/INSTALL_FAILED_UPDATE_INCOMPATIBLE|signatures do not match/i.test(out)) {
     return `${trimmed}\nA different build of this package is already installed; the pool will uninstall it between runs, but a leftover from outside the harness has to go by hand.`;

@@ -138,6 +138,26 @@ const PLIST_LABEL = 'com.nickbabenko.simcheck';
 const CODE_LABELS = [PLIST_LABEL, 'com.nickbabenko.simcheck-remote'];
 const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
 
+/**
+ * Off macOS there is no launchd. On the Linux pod the daemon is the systemd
+ * unit simbase-simcheck (docs/28 §5), so say how to drive that instead of
+ * failing on a missing launchctl. Returns true when it has answered.
+ */
+function managedBySystemd(action: 'start' | 'stop' | 'restart'): boolean {
+  if (process.platform === 'darwin') return false;
+
+  console.log(
+    'simcheck is managed by systemd on this machine, not launchd:\n' +
+    `  sudo systemctl ${action} simbase-simcheck\n` +
+    '  journalctl -u simbase-simcheck -f        (its log)\n' +
+    'Or, outside the service, run it in the foreground: simcheck start --foreground');
+  process.exitCode = 1;
+  return true;
+}
+
+/** `open` on macOS, `xdg-open` on a Linux desktop. */
+const opener = (): string => (process.platform === 'darwin' ? 'open' : 'xdg-open');
+
 async function start(): Promise<void> {
   if (flag('foreground')) {
     const daemon = path.join(path.dirname(new URL(import.meta.url).pathname), 'daemon.js');
@@ -145,6 +165,7 @@ async function start(): Promise<void> {
     child.on('exit', (code) => process.exit(code ?? 0));
     return;
   }
+  if (managedBySystemd('start')) return;
   if (!fs.existsSync(plistPath)) {
     console.error(`no launchd agent at ${plistPath}. Run ./install.sh, or use: simcheck start --foreground`);
     process.exit(1);
@@ -156,6 +177,7 @@ async function start(): Promise<void> {
 
 /** Restart everything running this repo's code. The thing to run after a build. */
 async function restart(): Promise<void> {
+  if (managedBySystemd('restart')) return;
   const uid = process.getuid?.() ?? 501;
   for (const label of CODE_LABELS) {
     const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
@@ -171,6 +193,7 @@ async function restart(): Promise<void> {
 }
 
 async function stop(): Promise<void> {
+  if (managedBySystemd('stop')) return;
   await launchctl(['bootout', `gui/${process.getuid?.() ?? 501}/${PLIST_LABEL}`], true);
   console.log('daemon stopped (pooled simulators stay booted)');
 }
@@ -198,6 +221,7 @@ function launchctl(argv: string[], tolerant = false): Promise<void> {
 const PS_SECOND_TRUNCATION_MS = 2000;
 
 async function staleAgents(): Promise<string[]> {
+  if (process.platform !== 'darwin') return [];     // launchd agents only
   const built = fs.statSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'mcp-server.js')).mtimeMs;
   const stale: string[] = [];
   for (const label of CODE_LABELS) {
@@ -399,7 +423,7 @@ async function list(): Promise<void> {
 function openDir(id: string): void {
   const dir = path.join(paths(cfg).runs, id);
   if (!fs.existsSync(dir)) { console.error(`no run directory at ${dir}`); process.exit(1); }
-  spawn('open', [dir], { stdio: 'inherit' });
+  spawn(opener(), [dir], { stdio: 'inherit' }).on('error', () => console.log(dir));
 }
 
 async function pool(): Promise<void> {
@@ -758,7 +782,7 @@ function openDocs(): void {
   const here = path.dirname(new URL(import.meta.url).pathname);
   const page = path.resolve(here, '..', 'docs', 'index.html');
   if (!fs.existsSync(page)) { console.error(`no docs page at ${page}`); process.exit(1); }
-  spawn('open', [page], { stdio: 'ignore', detached: true }).unref();
+  spawn(opener(), [page], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
   console.log(page);
 }
 

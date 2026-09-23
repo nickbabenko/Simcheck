@@ -7,6 +7,7 @@ import { baseUrl } from './config.js';
 import { isToolsError, resolveTools } from './android/sdk.js';
 import { listSystemImages, preferredAbi } from './android/avd.js';
 import { resolveDriverApks } from './android/touch.js';
+import { installHints } from './android/hints.js';
 
 export interface Check {
   name: string;
@@ -167,7 +168,7 @@ function androidChecks(cfg: Config): Check[] {
   if (isToolsError(tools)) {
     checks.push({
       name: 'Android SDK', state: 'fail', detail: tools.error,
-      fix: 'brew install --cask android-commandlinetools',
+      fix: installHints().sdk,
     });
     return checks;
   }
@@ -178,13 +179,15 @@ function androidChecks(cfg: Config): Check[] {
     : {
         name: 'JDK', state: 'fail',
         detail: 'no JDK found -- avdmanager, sdkmanager, apkanalyzer and Gradle all need one',
-        fix: 'brew install openjdk@21  (Homebrew JDKs are keg-only, so this resolves them by path rather than via /usr/bin/java)',
+        fix: process.platform === 'darwin'
+          ? `${installHints().jdk}  (Homebrew JDKs are keg-only, so this resolves them by path rather than via /usr/bin/java)`
+          : installHints().jdk,
       });
 
   const adb = run(tools.adb, ['--version']).split('\n')[0]?.trim();
   checks.push(adb
     ? { name: 'adb', state: 'ok', detail: adb }
-    : { name: 'adb', state: 'fail', detail: `not usable at ${tools.adb}`, fix: 'brew install --cask android-platform-tools' });
+    : { name: 'adb', state: 'fail', detail: `not usable at ${tools.adb}`, fix: installHints().adb });
 
   const abi = preferredAbi();
   checks.push(fs.existsSync(tools.emulator)
@@ -209,6 +212,24 @@ function androidChecks(cfg: Config): Check[] {
       name: 'System image', state: 'ok',
       detail: `${native.map((i) => `API ${i.api}`).join(', ')} (${abi})`,
     });
+  }
+
+  // The guest firewall needs `adb root`, which _playstore images refuse.
+  const rootable = native.filter((i) => !i.tag.includes('playstore'));
+  if (cfg.androidGuestFirewall === 'off' || cfg.androidGuestFirewall === 'best-effort') {
+    checks.push({
+      name: 'Guest firewall', state: 'warn',
+      detail: `androidGuestFirewall is "${cfg.androidGuestFirewall}": an app on an emulator may reach the host adb server (10.0.2.2:5037) and so every other emulator`,
+      fix: 'set "androidGuestFirewall": "required" before running anyone else\'s apps',
+    });
+  } else if (native.length && !rootable.length) {
+    checks.push({
+      name: 'Guest firewall', state: 'fail',
+      detail: 'only _playstore images are installed, and they refuse adb root, so every emulator will go offline',
+      fix: `sdkmanager "system-images;android-35;google_apis;${abi}"`,
+    });
+  } else {
+    checks.push({ name: 'Guest firewall', state: 'ok', detail: 'required: applied and verified at every emulator boot' });
   }
 
   checks.push(tools.aapt2
@@ -248,7 +269,9 @@ async function networkChecks(cfg: Config): Promise<Check[]> {
     });
   }
 
-  checks.push(await probeTls('api.anthropic.com'));
+  // With no LLM backend nothing here talks to Anthropic, and on an egress-
+  // policed box the probe can only produce a misleading failure.
+  if (cfg.llmBackend !== 'none') checks.push(await probeTls('api.anthropic.com'));
   if (cfg.cloudflareTeamDomain) checks.push(await probeTls(cfg.cloudflareTeamDomain));
 
   /* ------------------------------------------------------------------- edge */

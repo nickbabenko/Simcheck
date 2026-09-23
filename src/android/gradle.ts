@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { exec } from '../util.js';
 import { logger } from '../log.js';
+import { installHints } from './hints.js';
 import type { AndroidTools } from './sdk.js';
 
 const log = logger('gradle');
@@ -98,7 +99,7 @@ export async function assemble(tools: AndroidTools, opts: BuildOpts): Promise<Gr
   }
   if (!tools.javaHome) {
     throw new Error(
-      'Gradle needs a JDK and none was found. Install one with: brew install openjdk@21 ' +
+      `Gradle needs a JDK and none was found. Install one: ${installHints().jdk} ` +
       '(then re-run ./install.sh so the daemon inherits JAVA_HOME).');
   }
 

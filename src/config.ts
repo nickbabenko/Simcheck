@@ -106,6 +106,12 @@ export interface Config {
    */
   androidGuestFirewall: GuestFirewallMode;
   /**
+   * Extra emulator flags, appended to the harness's own (-no-window,
+   * -no-snapshot-save, -gpu ...). For -dns-server when the host resolver is
+   * not reachable from the guest, or -cores / -memory tuning.
+   */
+  androidEmulatorArgs: string[];
+  /**
    * Who is allowed to reach the daemon at all, before token checks:
    *  - 'none'              loopback only (default, and correct on a dev machine)
    *  - 'cloudflare-access' verify the Cf-Access-Jwt-Assertion JWT in-process
@@ -216,6 +222,7 @@ const DEFAULTS: Config = {
   androidGpu: 'swiftshader_indirect',
   androidBootTimeoutMs: 300_000,
   androidGuestFirewall: 'required',
+  androidEmulatorArgs: [],
   edgeAuth: 'none',
   edgeAllowLoopback: true,
   cloudflareTeamDomain: '',
@@ -249,7 +256,8 @@ const DEFAULTS: Config = {
   envProvisionTimeoutMs: 180_000,
 };
 
-const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms', 'envIngressListen']);
+const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms', 'envIngressListen',
+  'androidEmulatorArgs']);
 const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision', 'envEnabled']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
   'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb',

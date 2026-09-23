@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Config } from '../config.js';
+import { installHints } from './hints.js';
 
 /**
  * Finding the Android SDK, and a JDK to run its Java tools with.
@@ -19,6 +20,9 @@ const SDK_CANDIDATES = [
   '/opt/homebrew/share/android-commandlinetools',
   '/usr/local/share/android-commandlinetools',
   path.join(os.homedir(), 'Android', 'Sdk'),
+  // Linux: where the pod's setup.sh puts it, and Debian's android-sdk package.
+  '/opt/android-sdk',
+  '/usr/lib/android-sdk',
 ];
 
 /** Looks like an SDK root if it holds at least one of the tool directories. */
@@ -52,6 +56,11 @@ const JDK_CANDIDATES = [
   '/usr/local/opt/openjdk@17',
   '/opt/homebrew/opt/openjdk',
   '/usr/local/opt/openjdk',
+  // Linux: Debian and Ubuntu's openjdk packages.
+  '/usr/lib/jvm/java-21-openjdk-amd64',
+  '/usr/lib/jvm/java-21-openjdk-arm64',
+  '/usr/lib/jvm/java-17-openjdk-amd64',
+  '/usr/lib/jvm/java-17-openjdk-arm64',
 ];
 
 const isJdk = (home: string): boolean => fs.existsSync(path.join(home, 'bin', 'java'));
@@ -60,11 +69,14 @@ export function resolveJavaHome(): string | null {
   const declared = process.env['JAVA_HOME'];
   if (declared && isJdk(declared)) return declared;
 
-  // The system locator knows about anything properly registered.
-  const located = spawnSync('/usr/libexec/java_home', ['-v', '17+'], { encoding: 'utf8', timeout: 15_000 });
-  if (located.status === 0) {
-    const home = String(located.stdout).trim();
-    if (home && isJdk(home)) return home;
+  // macOS's locator knows about anything properly registered. It does not
+  // exist anywhere else.
+  if (process.platform === 'darwin') {
+    const located = spawnSync('/usr/libexec/java_home', ['-v', '17+'], { encoding: 'utf8', timeout: 15_000 });
+    if (located.status === 0) {
+      const home = String(located.stdout).trim();
+      if (home && isJdk(home)) return home;
+    }
   }
   return JDK_CANDIDATES.find(isJdk) ?? null;
 }
@@ -113,7 +125,7 @@ export function resolveTools(cfg: Config): AndroidTools | { error: string } {
   if (!sdkRoot) {
     return {
       error: 'no Android SDK found. Set androidSdk in ~/.simcheck/config.json or ANDROID_HOME, ' +
-        'or install one with: brew install --cask android-commandlinetools',
+        `or install one: ${installHints().sdk}`,
     };
   }
   const javaHome = resolveJavaHome();

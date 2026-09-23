@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import type { DeviceTarget, ExistingDevice } from '../device.js';
 import { exec, sleep } from '../util.js';
 import { logger } from '../log.js';
+import { installHints, preferredAbi } from './hints.js';
 import type { Adb } from './adb.js';
 import { waitForBoot } from './adb.js';
 import type { AndroidTools } from './sdk.js';
@@ -68,7 +69,7 @@ const readDirs = (dir: string): string[] => {
 
 /** The ABI an emulator should use on this host. Rosetta can run an x86_64
  *  image on Apple silicon, but it is slow enough to time out real runs. */
-export const preferredAbi = (): string => (process.arch === 'arm64' ? 'arm64-v8a' : 'x86_64');
+export { preferredAbi };
 
 /**
  * Resolve a requested runtime to an installed system image.
@@ -192,7 +193,7 @@ export async function createAvd(
     const why = (r.stderr || r.stdout).trim();
     if (/Unable to locate a Java Runtime|JAVA_HOME/i.test(why)) {
       throw new Error(
-        `avdmanager could not find a JDK. Install one (brew install openjdk@21) and set ` +
+        `avdmanager could not find a JDK. Install one (${installHints().jdk}) and set ` +
         `JAVA_HOME, or set it in ~/.simcheck/config.json. Underlying error: ${why.slice(0, 200)}`);
     }
     if (/device.*not.*(found|valid)|Invalid.*device/i.test(why)) {

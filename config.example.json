@@ -17,6 +17,8 @@
   "androidBootTimeoutMs": 300000,
   "//_androidGuestFirewall": "Inside an emulator 10.0.2.2 is the host's loopback, so an app can reach the host adb server (a shell on every other emulator). Every boot installs a guest firewall refusing it and verifies it from inside. 'required' takes an emulator offline when that fails (needs a google_apis image: _playstore refuses adb root); 'best-effort' only warns; 'off' is for a machine that runs nobody's apps but yours.",
   "androidGuestFirewall": "required",
+  "//_androidEmulatorArgs": "Extra emulator flags, e.g. [\"-dns-server\", \"1.1.1.1\"] when the host resolver is not reachable from the guest, or -cores / -memory tuning.",
+  "androidEmulatorArgs": [],
 
   "//_androidSdk": "Empty means: ANDROID_HOME, then ANDROID_SDK_ROOT, then the usual install locations.",
   "androidSdk": "",
