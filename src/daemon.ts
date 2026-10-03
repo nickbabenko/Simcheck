@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import path from 'node:path';
 import { loadConfig, paths } from './config.js';
+import type { Config } from './config.js';
 import { Pool } from './pool.js';
 import { Store } from './store.js';
 import { Runner } from './runner.js';
@@ -17,6 +19,44 @@ import { androidManifestReader } from './android/index.js';
 import { logger, logToFile } from './log.js';
 
 const log = logger('daemon');
+
+/**
+ * Truncate oversized logs in place.
+ *
+ * caddy.log and podman.log are launchd StandardOutPath targets, and launchd
+ * neither rotates them nor reopens them on rename -- renaming would leave the
+ * writer holding an unlinked inode and silently lose every later line. So the
+ * file is truncated in place and the offset left alone: the next write lands
+ * at the old offset, which APFS stores as a hole rather than real blocks.
+ */
+function rotateLogs(home: string, maxBytes: number): void {
+  if (!maxBytes) return;
+  let entries: string[];
+  try { entries = fs.readdirSync(home); } catch { return; }
+
+  for (const name of entries) {
+    if (!name.endsWith('.log')) continue;
+    const file = path.join(home, name);
+    try {
+      if (fs.statSync(file).size <= maxBytes) continue;
+      fs.truncateSync(file, 0);
+      log.info(`truncated ${name} (over ${(maxBytes / 1e6).toFixed(0)}MB)`);
+    } catch { /* racing writer or vanished file: next pass picks it up */ }
+  }
+}
+
+/** Recurring retention: artifact pruning plus log rotation. */
+function startHousekeeping(cfg: Config, artifacts: ArtifactStore): NodeJS.Timeout {
+  const sweep = (): void => {
+    try { artifacts.prune(cfg.artifactRetentionDays); }
+    catch (e) { log.warn('artifact prune failed', (e as Error).message); }
+    rotateLogs(cfg.home, cfg.maxLogBytes);
+  };
+  sweep();
+  const timer = setInterval(sweep, cfg.housekeepingIntervalMs);
+  timer.unref();
+  return timer;
+}
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -54,10 +94,13 @@ async function main(): Promise<void> {
     const reader = androidManifestReader(cfg);
     if (reader) artifacts.setManifestReader('android', reader);
   }
-  artifacts.prune(cfg.artifactRetentionDays);
-
   const store = new Store(cfg);
   store.load();
+
+  // Retention has to be recurring, not a startup step. A daemon that stays up
+  // for weeks -- the normal case -- would otherwise prune once and then let
+  // `artifacts/` grow until the disk filled.
+  const housekeeping = startHousekeeping(cfg, artifacts);
 
   const llm = await createLlm(cfg);
   const pool = new Pool(cfg, platforms);
@@ -112,6 +155,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info(`${signal} received, shutting down`);
+    clearInterval(housekeeping);
     scheduler.stop();
     await envs?.reconciler.stop();
     await pool.stop();

@@ -8,6 +8,7 @@ import { Client, DaemonDownError, readRequestFile, type RunView } from './client
 import type { RunRequest } from './types.js';
 import type { PlatformId } from './device.js';
 import { isPlatformId } from './device.js';
+import { applySlimConfig } from './android/slim.js';
 
 const cfg = loadConfig();
 const client = new Client(cfg);
@@ -62,6 +63,7 @@ const USAGE = `simcheck - hand off iOS simulator and Android emulator testing
        [--device "iPhone 17 Pro"] [--runtime "iOS 27.0"]
   simcheck pool remove <udid> [--force]
   simcheck inspect <device|udid>    live accessibility tree, for authoring steps
+  simcheck slim-avd <name>          strip unused peripherals from an existing AVD
 
 `;
 
@@ -102,6 +104,7 @@ async function main(): Promise<void> {
     case 'remote':  return remote();
     case 'tunnel':  return tunnel();
     case 'inspect': return void print(await client.inspect(need(1, 'device name or udid')));
+    case 'slim-avd': return slimAvd();
     case 'token':   return token();
     case undefined:
     case '-h': case '--help': case 'help':
@@ -334,6 +337,22 @@ function openDir(id: string): void {
   const dir = path.join(paths(cfg).runs, id);
   if (!fs.existsSync(dir)) { console.error(`no run directory at ${dir}`); process.exit(1); }
   spawn('open', [dir], { stdio: 'inherit' });
+}
+
+/**
+ * Apply the slim config.ini to an AVD that already exists.
+ *
+ * New AVDs get this at create time; this is for the ones already in the pool.
+ */
+function slimAvd(): void {
+  const name = need(1, 'AVD name');
+  const changed = applySlimConfig(name, cfg.androidDataPartitionMb);
+  if (!changed) { console.log(`${name} already matches the slim config`); return; }
+  console.log(
+    `slimmed ${name}.\n` +
+    `The userdata cap only applies to a partition that does not exist yet, so an\n` +
+    `AVD that has already grown keeps its current image until the next wipe:\n` +
+    `  simcheck pool remove ${name} --force && simcheck pool add -n 1 --platform android`);
 }
 
 async function pool(): Promise<void> {

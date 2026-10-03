@@ -8,6 +8,7 @@ import { logger } from '../log.js';
 import type { Adb } from './adb.js';
 import { waitForBoot } from './adb.js';
 import type { AndroidTools } from './sdk.js';
+import { applySlimConfig } from './slim.js';
 
 const log = logger('avd');
 
@@ -177,6 +178,7 @@ export const avdExists = (name: string): boolean =>
  */
 export async function createAvd(
   tools: AndroidTools, name: string, target: DeviceTarget,
+  slim?: { enabled: boolean; dataPartitionMb: number },
 ): Promise<void> {
   const args = [
     'create', 'avd',
@@ -203,6 +205,10 @@ export async function createAvd(
     throw new Error(`avdmanager create avd failed (exit ${r.code}): ${why.slice(0, 600)}`);
   }
   log.info(`created AVD ${name} (${target.deviceTypeId} / ${target.runtime})`);
+
+  // Rewritten after creation rather than passed to avdmanager, which has no
+  // flags for any of it -- the device profile is the only input it takes.
+  if (slim?.enabled) applySlimConfig(name, slim.dataPartitionMb);
 }
 
 export async function deleteAvd(tools: AndroidTools, name: string): Promise<void> {

@@ -70,9 +70,35 @@ export interface Config {
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Retain at most this many completed runs on disk. */
   retainRuns: number;
+  /**
+   * How often the daemon re-runs artifact pruning and log rotation.
+   *
+   * Retention used to run only at startup, so a daemon left up for weeks
+   * never pruned anything and `artifacts/` grew without bound.
+   */
+  housekeepingIntervalMs: number;
+  /** Truncate any ~/.simcheck/*.log past this size. launchd owns the caddy
+   *  and podman stdout files and will not rotate them itself. */
+  maxLogBytes: number;
   axeBin: string;
   /** Multi-touch driver. Optional: only pinch/pan/double_tap need it. */
   baguetteBin: string;
+  /**
+   * Disable the background daemons a simulator does not need, via simslim.
+   * Roughly quarters a booted simulator's memory, so more of the pool fits
+   * on one Mac. Missing binary is a warning, not an error.
+   */
+  simslim: boolean;
+  simslimBin: string;
+  /** Daemon categories to leave enabled (`simslim profiles` lists them).
+   *  "web" owns com.apple.swcd, which universal links need. */
+  simslimExcept: string[];
+  /** Individual launchd labels to keep, for a capability a whole category
+   *  would be too blunt to preserve. */
+  simslimKeep: string[];
+  /** Features asserted after slimming, via `simslim doctor --requires`. */
+  simslimRequires: string[];
+  simslimTimeoutMs: number;
   adbBin: string;
   emulatorBin: string;
   avdmanagerBin: string;
@@ -92,6 +118,15 @@ export interface Config {
   androidGpu: string;
   /** How long to wait for an emulator to boot before giving up. */
   androidBootTimeoutMs: number;
+  /**
+   * Strip the emulated peripherals and sensors a headless test emulator never
+   * uses out of a new AVD's config.ini, and cap userdata. Applied at create
+   * time; `simcheck slim-avd <name>` applies it to an existing one.
+   */
+  androidSlim: boolean;
+  /** userdata ceiling for a slimmed AVD. avdmanager's default is 6G, which a
+   *  long-lived pool device will grow into. 0 leaves it at the default. */
+  androidDataPartitionMb: number;
   /**
    * Who is allowed to reach the daemon at all, before token checks:
    *  - 'none'              loopback only (default, and correct on a dev machine)
@@ -193,8 +228,16 @@ const DEFAULTS: Config = {
   model: 'claude-opus-5',
   effort: 'high',
   retainRuns: 200,
+  housekeepingIntervalMs: 3_600_000,   // hourly
+  maxLogBytes: 64 * 1024 * 1024,       // 64 MiB
   axeBin: 'axe',
   baguetteBin: 'baguette',
+  simslim: true,
+  simslimBin: 'simslim',
+  simslimExcept: ['web'],              // universal links (com.apple.swcd)
+  simslimKeep: [],
+  simslimRequires: ['universal-links'],
+  simslimTimeoutMs: 180_000,
   adbBin: 'adb',
   emulatorBin: 'emulator',
   avdmanagerBin: 'avdmanager',
@@ -202,6 +245,8 @@ const DEFAULTS: Config = {
   androidDriverDir: '',
   androidGpu: 'swiftshader_indirect',
   androidBootTimeoutMs: 300_000,
+  androidSlim: true,
+  androidDataPartitionMb: 2048,
   edgeAuth: 'none',
   edgeAllowLoopback: true,
   cloudflareTeamDomain: '',
@@ -216,7 +261,7 @@ const DEFAULTS: Config = {
   buildCredentials: {},
   allowedBuildHosts: [],
   maxArtifactBytes: 1_073_741_824,   // 1 GiB
-  artifactRetentionDays: 14,
+  artifactRetentionDays: 1,
 
   envEnabled: false,
   envBaseDomain: 'env.localhost',
@@ -235,11 +280,13 @@ const DEFAULTS: Config = {
   envProvisionTimeoutMs: 180_000,
 };
 
-const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms', 'envIngressListen']);
-const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision', 'envEnabled']);
+const LIST = new Set(['cloudflareAud', 'trustedProxies', 'allowedBuildHosts', 'platforms', 'envIngressListen',
+  'simslimExcept', 'simslimKeep', 'simslimRequires']);
+const BOOLEAN = new Set(['edgeAllowLoopback', 'autoProvision', 'envEnabled', 'simslim', 'androidSlim']);
 const NUMERIC = new Set(['port', 'poolSize', 'defaultTimeoutMs', 'defaultMaxActions', 'retainRuns',
+  'housekeepingIntervalMs', 'maxLogBytes', 'simslimTimeoutMs',
   'maxArtifactBytes', 'artifactRetentionDays', 'remotePort', 'maxPoolDevices', 'minFreeDiskGb',
-  'androidBootTimeoutMs', 'envMaxConcurrent', 'envMaxReservations', 'envDefaultTtlSeconds', 'envMaxTtlSeconds',
+  'androidBootTimeoutMs', 'androidDataPartitionMb', 'envMaxConcurrent', 'envMaxReservations', 'envDefaultTtlSeconds', 'envMaxTtlSeconds',
   'envMaxMemoryMb', 'envMinFreeMemoryMb', 'envProvisionTimeoutMs']);
 
 /** Precedence: env > ~/.simcheck/config.json > defaults. */

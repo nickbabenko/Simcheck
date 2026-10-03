@@ -14,6 +14,7 @@ import { Axe } from './axe.js';
 import { Baguette } from './baguette.js';
 import { prepareApp } from './build.js';
 import { runXcTest } from './xctest.js';
+import { slim, isAvailable as simslimAvailable } from './simslim.js';
 
 const log = logger('ios');
 
@@ -48,7 +49,13 @@ class IosDevices implements DeviceBackend {
         `the AXe CLI ("${this.cfg.axeBin}") is not on PATH. It drives taps and typing on the simulator.\n` +
         '  brew tap cameroncooke/axe && brew trust cameroncooke/axe && brew install axe');
     }
-    return `axe ${version}`;
+    if (this.cfg.simslim && !await simslimAvailable(this.cfg.simslimBin)) {
+      log.warn(
+        `simslim is enabled but "${this.cfg.simslimBin}" is not on PATH; simulators will boot stock. ` +
+        'Install it with: brew install mobai-app/tap/simslim');
+      return `axe ${version}, simslim missing`;
+    }
+    return `axe ${version}${this.cfg.simslim ? ', simslim' : ''}`;
   }
 
   async resolveTarget(deviceType: string, runtime: string): Promise<DeviceTarget> {
@@ -77,7 +84,14 @@ class IosDevices implements DeviceBackend {
     }));
   }
 
-  boot = (id: string) => simctl.boot(id);
+  async boot(id: string): Promise<void> {
+    await simctl.boot(id);
+    // Slimmed after boot rather than once at create: `erase` resets a
+    // simulator's launchd overrides to stock, and the pool erases between
+    // runs, so per-boot is the only state that actually holds.
+    await slim(this.cfg, id);
+  }
+
   shutdown = (id: string) => simctl.shutdown(id);
   erase = (id: string) => simctl.erase(id);
   destroy = (id: string) => simctl.deleteDevice(id);

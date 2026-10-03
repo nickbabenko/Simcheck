@@ -62,7 +62,23 @@
   "model": "claude-opus-5",
   "effort": "high",
 
+  "//_simslim": "Disable the ~170 background daemons a simulator does not need, via simslim. Roughly quarters a booted simulator's memory. brew install mobai-app/tap/simslim",
+  "//_simslimExcept": "Daemon categories left enabled; `simslim profiles` lists them. 'web' owns com.apple.swcd, without which universal links open Safari instead of the app under test.",
+  "simslim": true,
+  "simslimBin": "simslim",
+  "simslimExcept": ["web"],
+  "simslimKeep": [],
+  "simslimRequires": ["universal-links"],
+  "simslimTimeoutMs": 180000,
+
+  "//_androidSlim": "Strip emulated peripherals and sensors out of a new AVD's config.ini and cap userdata. `simcheck slim-avd <name>` applies it to an existing AVD.",
+  "androidSlim": true,
+  "androidDataPartitionMb": 2048,
+
+  "//_retention": "Pruning is recurring, not a startup step: housekeepingIntervalMs is how often artifacts are pruned and oversized logs truncated.",
   "retainRuns": 200,
+  "housekeepingIntervalMs": 3600000,
+  "maxLogBytes": 67108864,
   "maxArtifactBytes": 1073741824,
-  "artifactRetentionDays": 14
+  "artifactRetentionDays": 1
 }

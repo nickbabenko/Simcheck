@@ -107,7 +107,10 @@ class AndroidDevices implements DeviceBackend {
   }
 
   async create(name: string, target: DeviceTarget): Promise<string> {
-    await createAvd(this.tools, name, target);
+    await createAvd(this.tools, name, target, {
+      enabled: this.cfg.androidSlim,
+      dataPartitionMb: this.cfg.androidDataPartitionMb,
+    });
     return name;                      // the AVD name is the stable identity
   }
 
