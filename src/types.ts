@@ -2,6 +2,13 @@
  *  the CLI and the daemon can all import it without pulling in the runtime. */
 
 import type { PlatformId } from './device.js';
+import {
+  IOS_BUTTONS as WIRE_IOS_BUTTONS,
+  ANDROID_BUTTONS as WIRE_ANDROID_BUTTONS,
+  type AssertionResult,
+  type HardwareButton as WireHardwareButton,
+  type Step,
+} from './wire/steps.js';
 
 export type DeviceStatus =
   | 'pending'    // in the pool, not yet booted -- waiting to be picked up
@@ -99,62 +106,20 @@ export interface DeviceRequest {
 /* ------------------------------------------------------------------ steps -- */
 
 /** A single deterministic action. The agent emits these too, so an NL run
- *  always produces a replayable step list. */
-export type Step =
-  | { action: 'launch'; args?: string[]; env?: Record<string, string> }
-  | { action: 'terminate' }
-  | { action: 'relaunch' }
-  | { action: 'tap'; id?: string; label?: string; value?: string; elementType?: string; x?: number; y?: number; waitTimeoutMs?: number; note?: string }
-  | { action: 'type'; text: string; note?: string }
-  | { action: 'clear_text' }
-  | { action: 'press_enter' }
-  | { action: 'swipe'; startX: number; startY: number; endX: number; endY: number; durationMs?: number }
-  | { action: 'gesture'; preset: GesturePreset; durationMs?: number }
-  | { action: 'pinch'; cx?: number; cy?: number; scale?: number; startSpread?: number; endSpread?: number; durationMs?: number; note?: string }
-  | { action: 'pan'; startX: number; startY: number; endX: number; endY: number; durationMs?: number }
-  | { action: 'two_finger_press'; cx?: number; cy?: number; gap?: number; holdMs?: number; note?: string }
-  | { action: 'double_tap'; x?: number; y?: number; id?: string; label?: string }
-  | { action: 'button'; button: HardwareButton; durationMs?: number }
-  | { action: 'wait'; ms: number; note?: string }
-  | { action: 'wait_for'; id?: string; label?: string; timeoutMs?: number }
-  /** Like wait_for, but a miss is a verdict on the app (the run fails) rather
-   *  than a harness error. Put one straight after an `open_url` so a deep link
-   *  that did not land fails the run instead of passing it silently. */
-  | { action: 'assert'; id?: string; label?: string; timeoutMs?: number; note?: string }
-  | { action: 'screenshot'; name: string; note?: string }
-  /** `via: "app"` hands the URL to the app through the probe (no system
-   *  consent sheet); `"simctl"` is the system path. Default: app when the
-   *  probe is attached, simctl otherwise. */
-  | { action: 'open_url'; url: string; via?: 'app' | 'simctl' }
-  | { action: 'appearance'; mode: 'light' | 'dark' }
-  | { action: 'permission'; service: string; grant: boolean }
-  | { action: 'describe_ui' }
-  /** Probe only: block until the app reports itself settled. A timeout is an
-   *  error: the caller asked for idleness explicitly. */
-  | { action: 'wait_idle'; timeoutMs?: number; quietMs?: number }
-  /** Probe only: a completed request matching `urlPattern` (a glob, `*` =
-   *  any run of characters, matched against the redacted URL), and `method`
-   *  / `status` when given. A miss fails the run, like `assert`. */
-  | { action: 'assert_request'; urlPattern: string; method?: string; status?: number; timeoutMs?: number; note?: string };
+ *  always produces a replayable step list. The union is simbase's step
+ *  contract, vendored in src/wire/steps.ts: one schema for both sides. */
+export type { Step, StepAction, StepOf, GesturePreset, AssertOp, AssertionResult } from './wire/steps.js';
 
-export type GesturePreset =
-  | 'scroll-up' | 'scroll-down' | 'scroll-left' | 'scroll-right'
-  | 'swipe-from-left-edge' | 'swipe-from-right-edge'
-  | 'swipe-from-top-edge' | 'swipe-from-bottom-edge';
 
 /**
  * Hardware buttons, across both platforms. A driver rejects one its own
  * platform does not have rather than pressing something else -- `siri` on an
  * emulator is a mistake worth surfacing, not silently ignoring.
  */
-export type HardwareButton =
-  // iOS
-  | 'home' | 'lock' | 'side-button' | 'siri' | 'apple-pay'
-  // Android
-  | 'back' | 'recents' | 'power' | 'volume-up' | 'volume-down' | 'menu';
+export type HardwareButton = WireHardwareButton;
 
-export const IOS_BUTTONS: readonly HardwareButton[] = ['home', 'lock', 'side-button', 'siri', 'apple-pay'];
-export const ANDROID_BUTTONS: readonly HardwareButton[] = ['home', 'back', 'recents', 'power', 'volume-up', 'volume-down', 'menu'];
+export const IOS_BUTTONS: readonly HardwareButton[] = WIRE_IOS_BUTTONS;
+export const ANDROID_BUTTONS: readonly HardwareButton[] = WIRE_ANDROID_BUTTONS;
 
 /* ------------------------------------------------------------------- runs -- */
 
@@ -360,6 +325,9 @@ export interface Run {
   screenshots: Screenshot[];
   trace: TraceEntry[];
   verdict?: { pass: boolean; summary: string; evidence?: string };
+  /** Every assertion the run checked, passed or failed, in order: what was
+   *  expected and what the app had. `step` indexes `executedSteps`. */
+  assertions?: AssertionResult[];
   error?: string;
   actionsUsed?: number;
   /** Structured results, when the mode ran a native test suite. */

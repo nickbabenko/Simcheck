@@ -127,7 +127,12 @@ into a `steps` run and the one-off exploration becomes a repeatable check.
 Actions: `tap` (by `id`, `label`, `value` or `x`/`y`), `double_tap`, `type`,
 `clear_text`, `press_enter`, `swipe`, `gesture`, **`pinch`**, **`pan`**,
 `button`, `wait`, `wait_for`, `assert`, `screenshot`, `open_url`, `appearance`,
-`permission`, `launch`, `relaunch`, `terminate`, `describe_ui`.
+`permission`, `launch`, `relaunch`, `terminate`, `describe_ui`, and with the
+probe `wait_idle` and `assert_request`. The schema for every action is
+simbase's step contract, vendored in `src/wire/steps.ts`: edit it in simbase
+(`packages/protocol/src/steps.ts`) and copy it across with
+`node scripts/vendor-steps.mjs ../simbase`, never here. `--check` says whether
+the copy has drifted.
 
 A steps run passes when no step throws, so a step has to *check* something for
 the run to prove it. `wait_for` throws when its element never appears, which
@@ -145,15 +150,33 @@ checks:
 ]
 ```
 
+`assert` can also check what the element holds: `text` (its accessibility
+label, which is what a static text shows), `value` (a field's contents, a
+switch's `"1"`/`"0"`) and `enabled`, with `"op": "eq"` (the default) or
+`"contains"`. It polls the screen until an element the selector picks has all
+of them. There is no regex on purpose: a caller's pattern run on the host can
+block the daemon.
+
+```json
+{ "action": "assert", "id": "basket-total", "text": "39,00", "op": "contains" }
+```
+
+Every `assert` and `assert_request` lands in the run's `assertions`, passed or
+failed, with what was expected and what the app actually had, and `step`
+pointing into `executedSteps`. The report gets an Assertions table.
+
 On iOS, the first `open_url` to a custom scheme on a simulator -- and the first
 after every erase -- is held behind SpringBoard's **"Open in '<App>'?"** sheet.
 `open_url` watches for it for about two seconds, taps Open, and leaves a trace
 note saying so. Recycling a device cancels any such sheets left stacked up.
 
-### The in-app probe (iOS, opt-in)
+### The in-app probe (iOS, on by default)
 
-`"probe": true` injects the greybox probe (`@simbase/probe`, configured with
-`probeDylib`) into the app. Every step then waits until the app says it has
+The greybox probe (`@simbase/probe`, configured with `probeDylib`) is injected
+into the app on every iOS run that drives the UI, whenever this daemon has it.
+`"probe": false` keeps it out; `"probe": true` insists, and says in the trace
+why not when it cannot attach. A `wait_idle` or `assert_request` step implies
+`true`. Every step then waits until the app says it has
 settled -- bounded by `settleTimeoutMs`, 10s by default -- instead of a fixed
 sleep, and each trace line records how it waited. Two steps need it:
 `wait_idle` (`timeoutMs`, `quietMs`) and `assert_request` (`urlPattern`, a glob
@@ -163,8 +186,9 @@ a miss fails the run, like `assert`). `open_url` goes through the app
 
 The run also keeps `network.json` and `console.log`, readable only by the
 token that submitted it unless the run sets `"evidence": {"network": "public"}`.
-The probe never fails a run: if it cannot attach, the run uses fixed waits and
-says why. `probe: "off"` (SIMCHECK_PROBE=off) switches it off daemon-wide.
+The probe never fails a run: if it cannot attach, the run uses fixed waits (and
+says why, when the run asked for it). `probe: "off"` (SIMCHECK_PROBE=off)
+switches it off daemon-wide.
 
 ### Multi-touch
 

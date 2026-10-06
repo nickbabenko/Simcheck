@@ -180,7 +180,9 @@ test('the relaunch -> open_url -> assert sequence validates', () => {
     { action: 'assert', id: 'settings-title', timeoutMs: 5000, note: 'deep link landed' },
   ]);
   assert.throws(() => validateSteps([{ action: 'assert' }]), /needs at least one of/);
-  assert.throws(() => validateSteps([{ action: 'assert', id: 'x', text: 'y' }]), /unsupported key "text"/);
+  validateSteps([{ action: 'assert', id: 'x', text: 'y', value: '1', enabled: true, op: 'contains' }]);
+  assert.throws(() => validateSteps([{ action: 'assert', id: 'x', op: 'eq' }]), /"op" compares "text" or "value"/);
+  assert.throws(() => validateSteps([{ action: 'assert', id: 'x', text: 'y', colour: 'red' }]), /unsupported key "colour"/);
 });
 
 test('an open_url with nothing checking it is flagged; one followed by assert or wait_for is not', () => {

@@ -241,8 +241,8 @@ test('the probe steps validate their keys', () => {
   validateSteps([{ action: 'wait_idle', timeoutMs: 5000, quietMs: 300 }, { action: 'assert_request', urlPattern: '*/x', status: 200 }]);
   assert.throws(() => validateSteps([{ action: 'assert_request' }]), /missing required key "urlPattern"/);
   assert.throws(() => validateSteps([{ action: 'assert_request', urlPattern: '*', method: 'G ET' }]), /HTTP method/);
-  assert.throws(() => validateSteps([{ action: 'wait_idle', timeoutMs: 120_000 }]), /between 0 and 60000/);
-  assert.throws(() => validateSteps([{ action: 'open_url', url: 'x://y', via: 'safari' }]), /"app" or "simctl"/);
+  assert.throws(() => validateSteps([{ action: 'wait_idle', timeoutMs: 120_000 }]), /"timeoutMs" must be at most 60000/);
+  assert.throws(() => validateSteps([{ action: 'open_url', url: 'x://y', via: 'safari' }]), /"via" must be one of "app", "simctl"/);
 });
 
 test('globMatches: * is the only wildcard, and nothing backtracks', () => {
@@ -324,15 +324,17 @@ async function daemon(platform = 'ios') {
 
 const REQ = { app: { bundleId: 'com.example.app' }, steps: [{ action: 'wait', ms: 1 }] };
 
-test('over HTTP: probe steps need probe: true, and the probe is iOS only', async () => {
+test('over HTTP: probe steps imply probe: true, refuse probe: false, and the probe is iOS only', async () => {
   const { server, owner } = await daemon();
   try {
-    await assert.rejects(owner.submit({ ...REQ, steps: [{ action: 'wait_idle' }] }), /steps\[0\] \(wait_idle\) needs the in-app probe/);
-    await assert.rejects(owner.submit({ ...REQ, steps: [{ action: 'open_url', url: 'x://y', via: 'app' }] }), /open_url with via "app"/);
-    await assert.rejects(owner.submit({ ...REQ, settleTimeoutMs: 5000 }), /only applies with "probe": true/);
+    const implied = await owner.submit({ ...REQ, steps: [{ action: 'wait_idle' }] });
+    assert.equal(implied.request.probe, true, 'a step that needs the probe insists on it');
+    const left = await owner.submit({ ...REQ, steps: [{ action: 'open_url', url: 'x://y' }] });
+    assert.equal(left.request.probe, undefined, 'otherwise the default stays the default');
+    await assert.rejects(owner.submit({ ...REQ, probe: false, steps: [{ action: 'wait_idle' }] }), /steps\[0\] \(wait_idle\) needs the in-app probe.*remove "probe": false/);
+    await assert.rejects(owner.submit({ ...REQ, probe: false, steps: [{ action: 'open_url', url: 'x://y', via: 'app' }] }), /open_url with via "app"/);
+    await assert.rejects(owner.submit({ ...REQ, probe: false, settleTimeoutMs: 5000 }), /only applies with the probe/);
     await assert.rejects(owner.submit({ ...REQ, probe: true, evidence: { network: 'everyone' } }), /"private" or "public"/);
-    const ok = await owner.submit({ ...REQ, probe: true, steps: [{ action: 'wait_idle' }, { action: 'assert_request', urlPattern: '*' }] });
-    assert.equal(ok.request.probe, true);
   } finally {
     server.close();
   }
@@ -340,6 +342,7 @@ test('over HTTP: probe steps need probe: true, and the probe is iOS only', async
   const android = await daemon('android');
   try {
     await assert.rejects(android.owner.submit({ ...REQ, probe: true }), /iOS simulator only/);
+    await assert.rejects(android.owner.submit({ ...REQ, steps: [{ action: 'wait_idle' }] }), /needs the in-app probe, which is iOS only/);
   } finally {
     android.server.close();
   }

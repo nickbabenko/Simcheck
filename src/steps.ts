@@ -1,15 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Step, StepSettle } from './types.js';
+import type { AssertionResult, Step, StepOf, StepSettle } from './types.js';
 import type { Store } from './store.js';
 import type { DeviceBackend, LaunchTarget, TouchDriver, UiDriver } from './device.js';
-import { renderScreen, type Screen } from './screen.js';
+import { renderScreen, type Screen, type UiElement } from './screen.js';
 import { sleep, slug, nowIso } from './util.js';
 import { logger } from './log.js';
 import { acceptOpenIn, findOpenInSheet } from './ios/consent.js';
 import type { ProbeSession } from './ios/probe-session.js';
 import { globMatches, type ProbeNetworkRequest } from './ios/probe.js';
 import { assertSafeLaunchArgs, assertSafeLaunchEnv } from './launchguard.js';
+import { MAX_ASSERTIONS, PROBE_ACTIONS, STEP_KEYS as WIRE_STEP_KEYS, stepProblem } from './wire/steps.js';
 
 const log = logger('steps');
 
@@ -39,7 +40,7 @@ export const DEFAULT_SETTLE_TIMEOUT_MS = 10_000;
 const SYSTEM_UI_CHECK = new Set(['launch', 'relaunch', 'open_url', 'button', 'tap', 'permission']);
 
 /** Steps that only mean anything with the probe attached. */
-export const PROBE_STEPS: readonly string[] = ['wait_idle', 'assert_request'];
+export const PROBE_STEPS: readonly string[] = PROBE_ACTIONS;
 
 /** Told to the caller when a multi-touch step has no driver behind it. */
 export const noTouchDriver = (platform: string): string =>
@@ -72,6 +73,7 @@ export class StepExecutor {
   /** The app's pid from the last launch, for crash attribution. */
   private appPid = 0;
   private crashNoted = false;
+  private assertionCapNoted = false;
 
   constructor(
     private ui: UiDriver,
@@ -285,6 +287,10 @@ export class StepExecutor {
    *  fixed sleep the probe has made redundant. */
   get probeAttached(): boolean { return Boolean(this.probe); }
 
+  /** Whether this run has a probe session at all, attached now or not: its
+   *  settle savings are worth reporting. */
+  get probeRequested(): boolean { return this.ctx.probe !== undefined; }
+
   /** Returns a description of what was actually driven, where that differs
    *  from what was asked for. Anything else traces as the step itself. */
   private async dispatch(step: Step): Promise<string | void> {
@@ -417,16 +423,8 @@ export class StepExecutor {
         return;
       }
 
-      case 'assert': {
-        const want = step.id ? `#${step.id}` : `"${step.label}"`;
-        const found = await this.ui.waitFor(step, step.timeoutMs ?? 10_000, signal);
-        // An abort is the run's timeout, not the app's failure.
-        if (!found && !signal.aborted) {
-          throw new AssertionFailed(`${want} did not appear within ${step.timeoutMs ?? 10_000}ms` +
-            (step.note ? ` (${step.note})` : ''));
-        }
-        return `assert ${want} is on screen -- it is`;
-      }
+      case 'assert':
+        return elementChecks(step).length ? this.assertElement(step) : this.assertPresent(step);
 
       case 'screenshot':
         // capture() writes its own trace line, timed.
@@ -489,6 +487,95 @@ export class StepExecutor {
           `Valid actions: ${Object.keys(STEP_KEYS).sort().join(', ')}`);
       }
     }
+  }
+
+  /** Index of the step in flight into the run's executedSteps, which record()
+   *  appends to in the same order run() starts them. */
+  private get stepIndex(): number { return this.stepStarts.length - 1; }
+
+  /** One checked expectation onto the run (docs/30 R3), pass or fail. */
+  private recordAssertion(result: Omit<AssertionResult, 'step'>): void {
+    const run = this.store.get(this.ctx.runId);
+    if (!run) return;
+    const results = run.assertions ?? (run.assertions = []);
+    if (results.length >= MAX_ASSERTIONS) {
+      if (results.length === MAX_ASSERTIONS && !this.assertionCapNoted) {
+        this.assertionCapNoted = true;
+        this.store.trace(this.ctx.runId, { kind: 'note', text: `more than ${MAX_ASSERTIONS} assertions: later results are not recorded, though they still decide the verdict` });
+      }
+      return;
+    }
+    results.push({ step: this.stepIndex, ...result });
+    this.store.persist(run);
+  }
+
+  /** `assert` with nothing but a selector: the element is on screen. */
+  private async assertPresent(step: StepOf<'assert'>): Promise<string> {
+    const { signal } = this.ctx;
+    const want = selectorText(step);
+    const timeoutMs = step.timeoutMs ?? 10_000;
+    const found = await this.ui.waitFor(step, timeoutMs, signal);
+    // An abort is the run's timeout, not the app's failure.
+    if (signal.aborted) throw new Error('aborted');
+
+    const target = targetOf(step);
+    if (!found) {
+      const message = `${want} did not appear within ${timeoutMs}ms` + (step.note ? ` (${step.note})` : '');
+      this.recordAssertion({ kind: 'node', target, prop: 'present', expected: true, actual: false, pass: false, message, ...noteOf(step) });
+      throw new AssertionFailed(message);
+    }
+    this.recordAssertion({ kind: 'node', target, prop: 'present', expected: true, actual: true, pass: true, ...noteOf(step) });
+    return `assert ${want} is on screen -- it is`;
+  }
+
+  /**
+   * `assert` with a text, value or enabled state (docs/30 R2): poll the screen
+   * until an element the selector picks has all of them, or the timeout. A
+   * miss is a verdict, with what the app actually had in the result.
+   */
+  private async assertElement(step: StepOf<'assert'>): Promise<string> {
+    const { signal } = this.ctx;
+    const want = selectorText(step);
+    const checks = elementChecks(step);
+    const timeoutMs = step.timeoutMs ?? 10_000;
+    const deadline = Date.now() + timeoutMs;
+    let candidates: UiElement[] = [];
+
+    for (;;) {
+      const screen = await this.ui.describe(signal).catch(() => null);
+      if (screen) {
+        this.lastScreen = screen;
+        candidates = screen.elements.filter((element) => selects(element, step));
+      }
+      const hit = candidates.find((element) => checks.every((check) => holds(element, check)));
+      if (hit) {
+        for (const check of checks) {
+          this.recordAssertion({ ...checkResult(step, check, hit), pass: true, ...noteOf(step) });
+        }
+        return `assert ${want} ${describeChecks(checks)} -- it is`;
+      }
+      if (Date.now() >= deadline || signal.aborted) break;
+      await sleep(500, signal);
+    }
+    if (signal.aborted) throw new Error('aborted');
+
+    const target = targetOf(step);
+    const closest = candidates[0];
+    if (!closest) {
+      const message = `${want} did not appear within ${timeoutMs}ms` + (step.note ? ` (${step.note})` : '');
+      this.recordAssertion({ kind: 'node', target, prop: 'present', expected: true, actual: false, pass: false, message, ...noteOf(step) });
+      throw new AssertionFailed(message);
+    }
+
+    const misses: string[] = [];
+    for (const check of checks) {
+      const pass = holds(closest, check);
+      const result = checkResult(step, check, closest);
+      const message = pass ? undefined : `${want} ${check.prop} was ${JSON.stringify(result.actual)}, expected ${check.op === 'contains' ? 'it to contain ' : ''}${JSON.stringify(check.expected)}`;
+      if (message) misses.push(message);
+      this.recordAssertion({ ...result, pass, ...(message ? { message } : {}), ...noteOf(step) });
+    }
+    throw new AssertionFailed(`${misses.join('; ')} after ${timeoutMs}ms` + (step.note ? ` (${step.note})` : ''));
   }
 
   /**
@@ -554,7 +641,7 @@ export class StepExecutor {
    * does. Without a probe it cannot be checked at all, which is an error --
    * never a pass.
    */
-  private async assertRequest(step: Extract<Step, { action: 'assert_request' }>): Promise<string> {
+  private async assertRequest(step: StepOf<'assert_request'>): Promise<string> {
     const probe = this.probe;
     const want = `${step.method ? `${step.method.toUpperCase()} ` : ''}${step.urlPattern}${step.status !== undefined ? ` -> ${step.status}` : ''}`;
     if (!probe) {
@@ -576,17 +663,26 @@ export class StepExecutor {
       }
 
       const hit = seen.find((request) => request.state === 'completed' && requestMatches(request, step));
-      if (hit) return `assert request ${hit.method} ${hit.url} -> ${hit.status ?? '?'}`;
+      if (hit) {
+        this.recordAssertion({ ...requestResult(step, want, hit), pass: true, ...noteOf(step) });
+        return `assert request ${hit.method} ${hit.url} -> ${hit.status ?? '?'}`;
+      }
 
       if (Date.now() >= deadline || this.ctx.signal.aborted) break;
       await sleep(100, this.ctx.signal);
     }
 
     if (this.ctx.signal.aborted) throw new Error('aborted');
-    const near = seen.filter((request) => globMatches(step.urlPattern, request.url)).slice(-3)
+    const nearby = seen.filter((request) => globMatches(step.urlPattern, request.url)).slice(-3);
+    const near = nearby
       .map((request) => `${request.method} ${request.url} ${request.state}${request.status !== undefined ? ` ${request.status}` : ''}`);
-    throw new AssertionFailed(`no completed request matching ${want} within ${timeoutMs}ms` +
-      (near.length ? `; saw ${near.join('; ')}` : '') + (step.note ? ` (${step.note})` : ''));
+    const message = `no completed request matching ${want} within ${timeoutMs}ms` +
+      (near.length ? `; saw ${near.join('; ')}` : '') + (step.note ? ` (${step.note})` : '');
+    const closest = nearby.at(-1);
+    this.recordAssertion({
+      ...requestResult(step, want, closest), pass: false, message: message.slice(0, 2000), ...noteOf(step),
+    });
+    throw new AssertionFailed(message);
   }
 
   /** Save a named PNG into the run directory and index it on the run. */
@@ -650,6 +746,84 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** One property an `assert` checks beyond presence. */
+interface ElementCheck {
+  prop: 'text' | 'value' | 'enabled';
+  expected: string | boolean;
+  op?: 'eq' | 'contains';
+}
+
+/** What an `assert` step checks beyond presence, in a stable order. */
+function elementChecks(step: StepOf<'assert'>): ElementCheck[] {
+  const op = step.op ?? 'eq';
+  const checks: ElementCheck[] = [];
+  if (step.text !== undefined) checks.push({ prop: 'text', expected: step.text, op });
+  if (step.value !== undefined) checks.push({ prop: 'value', expected: step.value, op });
+  if (step.enabled !== undefined) checks.push({ prop: 'enabled', expected: step.enabled });
+  return checks;
+}
+
+/** The selector semantics the drivers use for tap and wait_for: an id
+ *  exactly, or a label exactly or as a substring. */
+const selects = (element: UiElement, step: { id?: string; label?: string }): boolean =>
+  step.id ? element.id === step.id : Boolean(step.label && (element.label === step.label || element.label?.includes(step.label)));
+
+/** `text` is the accessibility label (what a static text shows); `value` a
+ *  field's contents or a switch's state. */
+const readProp = (element: UiElement, prop: ElementCheck['prop']): string | boolean | undefined =>
+  prop === 'text' ? element.label : prop === 'value' ? element.value : element.enabled;
+
+function holds(element: UiElement, check: ElementCheck): boolean {
+  const actual = readProp(element, check.prop);
+  if (check.prop === 'enabled') return actual === check.expected;
+  if (typeof actual !== 'string') return false;
+  return check.op === 'contains' ? actual.includes(String(check.expected)) : actual === check.expected;
+}
+
+const targetOf = (step: { id?: string; label?: string }): { id?: string; label?: string } =>
+  step.id ? { id: step.id } : { label: step.label ?? '' };
+
+const noteOf = (step: { note?: string }): { note?: string } => (step.note ? { note: step.note } : {});
+
+const selectorText = (step: { id?: string; label?: string }): string =>
+  step.id ? `#${step.id}` : `"${step.label}"`;
+
+const describeChecks = (checks: ElementCheck[]): string => checks.map((check) =>
+  check.prop === 'enabled' ? (check.expected ? 'is enabled' : 'is disabled')
+    : `${check.prop} ${check.op === 'contains' ? 'contains' : '='} ${JSON.stringify(check.expected)}`).join(', ');
+
+function checkResult(
+  step: StepOf<'assert'>, check: ElementCheck, element: UiElement,
+): Omit<AssertionResult, 'step' | 'pass'> {
+  const actual = readProp(element, check.prop);
+  return {
+    kind: 'node', target: targetOf(step), prop: check.prop,
+    ...(check.op ? { op: check.op } : {}),
+    expected: check.expected,
+    ...(actual !== undefined ? { actual } : {}),
+  };
+}
+
+function requestResult(
+  step: StepOf<'assert_request'>, want: string, request: ProbeNetworkRequest | undefined,
+): Omit<AssertionResult, 'step' | 'pass'> {
+  return {
+    kind: 'request',
+    match: want.slice(0, 2200),
+    expected: {
+      urlPattern: step.urlPattern,
+      ...(step.method ? { method: step.method.toUpperCase() } : {}),
+      ...(step.status !== undefined ? { status: step.status } : {}),
+    },
+    ...(request ? {
+      actual: {
+        method: request.method, url: request.url, state: request.state,
+        ...(request.status !== undefined ? { status: request.status } : {}),
+      },
+    } : {}),
+  };
+}
+
 function requestMatches(
   request: ProbeNetworkRequest,
   want: { urlPattern: string; method?: string; status?: number },
@@ -660,128 +834,24 @@ function requestMatches(
 }
 
 /**
- * The keys each action actually reads.
+ * The keys each action actually reads, from the shared step contract.
  *
  * Submitted steps used to be cast straight to `Step[]`, so a key the harness
  * does not implement was silently dropped and the run still reported success.
  * That is how three pinches at scale 3.0, 1.5 and 0.4 all performed the same
  * gesture and all passed. An unimplemented parameter must fail loudly.
  */
-export const STEP_KEYS: Record<string, readonly string[]> = {
-  launch: ['args', 'env'],
-  terminate: [],
-  relaunch: [],
-  tap: ['id', 'label', 'value', 'elementType', 'x', 'y', 'waitTimeoutMs', 'note'],
-  type: ['text', 'note'],
-  clear_text: [],
-  press_enter: [],
-  swipe: ['startX', 'startY', 'endX', 'endY', 'durationMs'],
-  gesture: ['preset', 'durationMs'],
-  pinch: ['cx', 'cy', 'scale', 'startSpread', 'endSpread', 'durationMs', 'note'],
-  pan: ['startX', 'startY', 'endX', 'endY', 'durationMs'],
-  two_finger_press: ['cx', 'cy', 'gap', 'holdMs', 'note'],
-  double_tap: ['x', 'y', 'id', 'label'],
-  button: ['button', 'durationMs'],
-  wait: ['ms', 'note'],
-  wait_for: ['id', 'label', 'timeoutMs'],
-  assert: ['id', 'label', 'timeoutMs', 'note'],
-  screenshot: ['name', 'note'],
-  open_url: ['url', 'via'],
-  appearance: ['mode'],
-  permission: ['service', 'grant'],
-  describe_ui: [],
-  wait_idle: ['timeoutMs', 'quietMs'],
-  assert_request: ['urlPattern', 'method', 'status', 'timeoutMs', 'note'],
-};
-
-/** Parameters without which an action cannot be carried out. Missing ones used
- *  to reach the driver as `NaN` -- `axe --start-x NaN` -- which fails deep in a
- *  subprocess instead of at submit time where the mistake is. */
-const STEP_REQUIRED: Record<string, readonly string[]> = {
-  swipe: ['startX', 'startY', 'endX', 'endY'],
-  pan: ['startX', 'startY', 'endX', 'endY'],
-  type: ['text'],
-  gesture: ['preset'],
-  button: ['button'],
-  wait: ['ms'],
-  screenshot: ['name'],
-  open_url: ['url'],
-  appearance: ['mode'],
-  permission: ['service', 'grant'],
-  assert_request: ['urlPattern'],
-};
-
-/** Actions that need at least one of a set, rather than all of it. */
-const STEP_ONE_OF: Record<string, readonly string[]> = {
-  tap: ['id', 'label', 'value', 'x'],
-  wait_for: ['id', 'label'],
-  assert: ['id', 'label'],
-  double_tap: ['id', 'label', 'x'],
-};
-
-/** Keys the driver treats as numbers. A string here becomes NaN downstream. */
-const NUMERIC_KEYS = new Set([
-  'x', 'y', 'startX', 'startY', 'endX', 'endY', 'cx', 'cy', 'scale',
-  'startSpread', 'endSpread', 'gap', 'holdMs', 'durationMs', 'ms',
-  'timeoutMs', 'waitTimeoutMs', 'quietMs', 'status',
-]);
+export const STEP_KEYS: Record<string, readonly string[]> = WIRE_STEP_KEYS;
 
 /** Throws if a submitted step names an action or a parameter the harness does
- *  not implement. The message names the offending key, since the whole failure
- *  mode being prevented is one that otherwise leaves no trace. */
+ *  not implement, or gives one a value it cannot use. The message names the
+ *  offending key, since the whole failure mode being prevented is one that
+ *  otherwise leaves no trace. The rules are simbase's (src/wire/steps.ts), so
+ *  the control plane refuses exactly what this daemon would. */
 export function validateSteps(steps: unknown[]): void {
   steps.forEach((raw, i) => {
-    const where = `steps[${i}]`;
-    if (!raw || typeof raw !== 'object') throw new Error(`${where} is not an object`);
-    const step = raw as Record<string, unknown>;
-    const action = step['action'];
-    if (typeof action !== 'string') throw new Error(`${where} has no \`action\``);
-    const allowed = STEP_KEYS[action];
-    if (!allowed) {
-      throw new Error(`${where}: unknown action "${action}". Known actions: ${Object.keys(STEP_KEYS).sort().join(', ')}`);
-    }
-    const unknown = Object.keys(step).filter((k) => k !== 'action' && !allowed.includes(k));
-    if (unknown.length) {
-      throw new Error(`${where} (${action}): unsupported ${unknown.length > 1 ? 'keys' : 'key'} ` +
-        `${unknown.map((k) => `"${k}"`).join(', ')}. ${action} accepts: ${allowed.join(', ') || 'no parameters'}`);
-    }
-
-    const missing = (STEP_REQUIRED[action] ?? []).filter((k) => step[k] === undefined);
-    if (missing.length) {
-      throw new Error(`${where} (${action}): missing required ${missing.length > 1 ? 'keys' : 'key'} ` +
-        `${missing.map((k) => `"${k}"`).join(', ')}. ${action} needs: ${STEP_REQUIRED[action]!.join(', ')}`);
-    }
-
-    const oneOf = STEP_ONE_OF[action];
-    if (oneOf && !oneOf.some((k) => step[k] !== undefined)) {
-      throw new Error(`${where} (${action}): needs at least one of ${oneOf.map((k) => `"${k}"`).join(', ')}`);
-    }
-
-    for (const [k, v] of Object.entries(step)) {
-      if (!NUMERIC_KEYS.has(k) || v === undefined) continue;
-      if (typeof v !== 'number' || !Number.isFinite(v)) {
-        throw new Error(`${where} (${action}): "${k}" must be a finite number, got ${JSON.stringify(v)}`);
-      }
-    }
-
-    if (action === 'open_url' && step['via'] !== undefined && step['via'] !== 'app' && step['via'] !== 'simctl') {
-      throw new Error(`${where} (open_url): "via" must be "app" or "simctl"`);
-    }
-    if (action === 'assert_request') {
-      const pattern = step['urlPattern'];
-      if (typeof pattern !== 'string' || !pattern || pattern.length > 2048) {
-        throw new Error(`${where} (assert_request): "urlPattern" must be a non-empty string of at most 2048 characters`);
-      }
-      if (step['method'] !== undefined && (typeof step['method'] !== 'string' || !/^[A-Za-z]{1,16}$/.test(step['method']))) {
-        throw new Error(`${where} (assert_request): "method" must be an HTTP method such as "GET"`);
-      }
-    }
-    for (const key of ['timeoutMs', 'quietMs'] as const) {
-      const value = step[key];
-      if (PROBE_STEPS.includes(action) && typeof value === 'number' && (value < 0 || value > 60_000)) {
-        throw new Error(`${where} (${action}): "${key}" must be between 0 and 60000`);
-      }
-    }
+    const problem = stepProblem(raw, `steps[${i}]`);
+    if (problem) throw new Error(problem);
   });
 }
 
@@ -890,7 +960,10 @@ export function describeStep(step: Step): string {
     case 'type': return `type ${JSON.stringify(step.text.length > 60 ? step.text.slice(0, 60) + '...' : step.text)}`;
     case 'wait': return `wait ${step.ms}ms`;
     case 'wait_for': return `wait for ${step.id ?? step.label}`;
-    case 'assert': return `assert ${step.id ? `#${step.id}` : `"${step.label}"`} is on screen`;
+    case 'assert': {
+      const checks = elementChecks(step);
+      return `assert ${selectorText(step)} ${checks.length ? describeChecks(checks) : 'is on screen'}`;
+    }
     case 'screenshot': return `screenshot "${step.name}"`;
     case 'gesture': return `gesture ${step.preset}`;
     case 'pinch': {

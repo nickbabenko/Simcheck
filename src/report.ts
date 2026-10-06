@@ -76,6 +76,17 @@ export function writeReport(run: Run, runDir: string): string {
 
   if (run.verdict?.evidence) L.push('## Evidence', '', run.verdict.evidence, '');
 
+  if (run.assertions?.length) {
+    const failed = run.assertions.filter((a) => !a.pass).length;
+    L.push(`## Assertions (${failed ? `${failed} of ${run.assertions.length} failed` : `all ${run.assertions.length} held`})`, '');
+    L.push('| Step | | Checked | Expected | Actual |', '|---|---|---|---|---|');
+    for (const a of run.assertions) {
+      const what = a.kind === 'request' ? `request ${a.match ?? ''}` : `${a.target?.id ? `#${a.target.id}` : `"${a.target?.label ?? ''}"`} ${a.prop ?? 'present'}${a.op === 'contains' ? ' contains' : ''}`;
+      L.push(`| ${a.step + 1} | ${a.pass ? 'held' : '**failed**'} | ${cell(what)} | ${cell(a.expected)} | ${a.actual === undefined ? '-' : cell(a.actual)} |`);
+    }
+    L.push('');
+  }
+
   if (run.tests) {
     L.push('## Tests', '');
     L.push(`${run.tests.total} run, ${run.tests.failed} failed, ${run.tests.skipped} skipped`, '');
@@ -147,4 +158,11 @@ function describeSettle(settle: StepSettle): string {
     : `timed out after ${settle.waitedMs}ms: ${settle.busy?.join(', ') || 'still redrawing'}`;
   const was = settle.fallbackMs ? ` (sleep was ${settle.fallbackMs}ms)` : '';
   return `${outcome}${was}${settle.systemUi ? `; system UI: ${settle.systemUi}` : ''}`;
+}
+
+/** A value in a markdown table cell: JSON for anything but a string, and no
+ *  pipe or newline to break the row. */
+function cell(value: unknown): string {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return (text ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 200);
 }

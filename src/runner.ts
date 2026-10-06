@@ -219,9 +219,7 @@ export class Runner {
       // shows the app coming up.
       if (run.request.record) recording = await this.startRecording(run.id, platform.devices, device.udid, runDir);
 
-      const probe = run.request.probe && device.platform === 'ios' && !isNativeTestMode(run.mode)
-        ? await this.probeFor(run.id, runDir)
-        : undefined;
+      const probe = await this.probeForRun(run, device.platform, runDir);
       const stepper = new StepExecutor(ui, platform.devices, this.store, {
         runId: run.id,
         udid: device.udid,
@@ -448,6 +446,23 @@ export class Runner {
   }
 
   /**
+   * The probe for this run (docs/23; on by default since simbase docs/30 R4).
+   * `probe: true` insists: a session, or null with a note saying why not.
+   * Left out, it attaches wherever it can -- an iOS run that drives the UI on
+   * a daemon that has the dylib -- and otherwise the run reads exactly as it
+   * always did, with no note. `false` keeps it out of the app.
+   */
+  private async probeForRun(run: Run, platform: string, runDir: string): Promise<ProbeSession | null | undefined> {
+    const requested = run.request.probe;
+    if (requested === false || platform !== 'ios' || isNativeTestMode(run.mode)) return undefined;
+    if (requested) return this.probeFor(run.id, runDir);
+
+    this.probeAvailability ??= resolveProbe(this.cfg);
+    if ('unavailable' in this.probeAvailability) return undefined;
+    return (await this.probeFor(run.id, runDir)) ?? undefined;
+  }
+
+  /**
    * The probe session for a `probe: true` run, or null (with a trace note)
    * when the daemon cannot provide one. Never throws: the probe never fails
    * a run.
@@ -479,7 +494,7 @@ export class Runner {
       if (evidence.networkLog || evidence.consoleLog) {
         this.store.update(runId, { artifacts: { ...current.artifacts, ...evidence } });
       }
-      if (current.request.probe) mergeTimings(this.store, runId, { settleSavedMs: Math.round(executor.settleSavedMs) });
+      if (executor.probeRequested) mergeTimings(this.store, runId, { settleSavedMs: Math.round(executor.settleSavedMs) });
     } catch (e) {
       log.warn('could not close the probe session', (e as Error).message);
     }

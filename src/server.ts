@@ -4,7 +4,8 @@ import path from 'node:path';
 import type { Config } from './config.js';
 import type { Pool } from './pool.js';
 import type { Store } from './store.js';
-import { validateSteps, PROBE_STEPS } from './steps.js';
+import { validateSteps } from './steps.js';
+import { needsProbe as stepNeedsProbe } from './wire/steps.js';
 import { assertSafeLaunchOptions } from './launchguard.js';
 import { resolveProbe } from './ios/probe.js';
 import type { Runner } from './runner.js';
@@ -715,7 +716,9 @@ function probeHealth(cfg: Config): { available: boolean; reason?: string } {
 /**
  * `probe` and what depends on it. Refused here rather than mid-run: a step
  * that needs the probe on a run that cannot have one is a mistake the caller
- * should hear about before a device is leased.
+ * should hear about before a device is leased. Left out, the probe attaches
+ * wherever it can (simbase docs/30 R4); a step that needs it makes that
+ * `probe: true`, so the run says so if it cannot attach.
  */
 function validateProbeRequest(body: RunRequest, platform: PlatformId): void {
   if (body.probe !== undefined && typeof body.probe !== 'boolean') {
@@ -728,18 +731,24 @@ function validateProbeRequest(body: RunRequest, platform: PlatformId): void {
     throw new HttpError(400, 'probe cannot be combined with xctest: the test runner launches the app itself');
   }
 
-  const needsProbe = (body.steps ?? []).findIndex((step) =>
-    PROBE_STEPS.includes(step.action) || (step.action === 'open_url' && step.via === 'app'));
-  if (needsProbe >= 0 && !body.probe) {
+  const needsProbe = (body.steps ?? []).findIndex(stepNeedsProbe);
+  if (needsProbe >= 0) {
     const step = body.steps![needsProbe]!;
     const what = step.action === 'open_url' ? 'open_url with via "app"' : step.action;
-    throw new HttpError(400, `steps[${needsProbe}] (${what}) needs the in-app probe: set "probe": true (iOS only)`);
+    if (body.probe === false || platform !== 'ios') {
+      throw new HttpError(400, `steps[${needsProbe}] (${what}) needs the in-app probe, which is iOS only` +
+        (body.probe === false ? ': remove "probe": false' : ''));
+    }
+    if (body.xctest || body.instrumentation) {
+      throw new HttpError(400, `steps[${needsProbe}] (${what}) needs the in-app probe, which cannot be combined with xctest`);
+    }
+    body.probe = true;
   }
 
   if (body.settleTimeoutMs !== undefined) {
     const valid = typeof body.settleTimeoutMs === 'number' && body.settleTimeoutMs >= 200 && body.settleTimeoutMs <= 60_000;
     if (!valid) throw new HttpError(400, 'settleTimeoutMs must be a number between 200 and 60000');
-    if (!body.probe) throw new HttpError(400, 'settleTimeoutMs only applies with "probe": true');
+    if (body.probe === false) throw new HttpError(400, 'settleTimeoutMs only applies with the probe; remove "probe": false');
   }
 
   const network = body.evidence?.network;
