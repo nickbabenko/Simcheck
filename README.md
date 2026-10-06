@@ -1,5 +1,10 @@
 # simcheck
 
+> **Archived — no longer maintained.** simcheck now lives in the simbase monorepo
+> as `apps/simcheck` (nickbabenko/simbase), where all further work happens. This
+> repository is kept as-is for its history; it gets no fixes or updates, and
+> issues and pull requests here will not be picked up.
+
 Hand off mobile UI testing to a pool of pre-booted iOS simulators and Android
 emulators.
 
